@@ -2,7 +2,7 @@
 
 Lightweight Go framework для построения API Composition / BFF layer поверх unary gRPC сервисов.
 
-Этот репозиторий — **только документация**: продуктовое видение, спецификация, roadmap. Код фреймворка живёт отдельно.
+Репозиторий содержит и код фреймворка, и продуктовое видение. Актуальный статус реализации — см. секцию [Implementation Status](#implementation-status).
 
 ---
 
@@ -167,34 +167,63 @@ Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) → отложе
 
 ---
 
-## v0.1 Scope
+## Implementation Status
 
-### Включено
+Легенда: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
-- unary gRPC proxying через generics
-- typed binding: `bind.Path`, `bind.Query`, `bind.JSON`
-- response mapping (`Map`)
-- HTTP success status override (`OnSuccess`)
-- gRPC `Status` → HTTP code mapping (базовый)
-- chi adapter
-- net/http совместимость
+### v0.1 — Core proxy
 
-### Отложено
-
-| Feature | Target |
+| Functional Requirement | Status |
 |---|---|
-| Aggregation helpers (`Parallel`, `Call`, `.Optional()`) | v0.3 |
-| `bind.Header` | v0.2 |
-| `Location` builder | v0.2 |
-| Validation hook + protovalidate adapter | v0.2 |
-| Metadata forwarding (HTTP header → grpc metadata) | v0.2 — отдельно от tracing |
-| RFC 7807 error details (BadRequest field violations, ErrorInfo) | v0.2 |
-| Streaming / SSE / WS | вне scope; Connect-Go |
-| Retries / circuit breakers | вне scope; grpc interceptors |
-| Auth framework | вне scope; HTTP middleware до `Proxy` |
-| Caching | вне scope; HTTP middleware |
-| OpenAPI генерация | отдельный tool в будущем |
-| gin / echo first-class | сообщество |
+| `Proxy[Req, Resp]` через generics, type-safe binding | ✅ Done |
+| `bind.Path` (через `r.PathValue`, stdlib 1.22+) | ✅ Done |
+| `bind.Query` | ✅ Done |
+| gRPC `Status` → HTTP code mapping + 5xx redaction | ✅ Done |
+| `protojson` для `proto.Message` ответов | ✅ Done |
+| `bind.JSON` (protojson + generic `proto.Message` constraint) | 📋 Next |
+| Response mapping `Map(func(*Resp) any)` | 📋 Next |
+| HTTP success status override `OnSuccess(int)` | 📋 Next |
+| chi adapter через `SetDefaultPathExtractor` | 📋 Next |
+| Runnable example в `examples/basic/` с реальным `.proto` | 📋 Next |
+
+### v0.2 — Production essentials
+
+| Functional Requirement | Status |
+|---|---|
+| `bind.Header` | ⏳ Planned |
+| `Location` builder для POST → 201 | ⏳ Planned |
+| Validation hook + `protovalidate` adapter | ⏳ Planned |
+| Metadata forwarding (HTTP header → grpc metadata, allowlist) | ⏳ Planned |
+| RFC 7807 error details (BadRequest field violations, ErrorInfo) | ⏳ Planned |
+| `WithErrorMapper` для per-route override | ⏳ Planned |
+
+### v0.3 — Aggregation
+
+| Functional Requirement | Status |
+|---|---|
+| `Aggregate(func)` для custom handlers | ⏳ Planned |
+| `Parallel` + `Call` helpers с errgroup-семантикой | ⏳ Planned |
+| `.Optional()` для partial-response | ⏳ Planned |
+
+### v0.4+ — Sugar & tooling
+
+| Functional Requirement | Status |
+|---|---|
+| OpenAPI генерация из binder metadata | ⏳ Planned |
+| gin / echo адаптеры | ⏳ Planned |
+| Optional codegen для setter'ов (если ergonomics окажется болью) | ⏳ Planned |
+| Multipart / file upload (`bind.Multipart`) | ⏳ Planned |
+
+### Out of scope (явно не делаем)
+
+| Feature | Куда смотреть |
+|---|---|
+| ❌ Streaming / SSE / WebSockets | Connect-Go или ручной handler |
+| ❌ Retries | grpc client interceptors |
+| ❌ Circuit breakers | grpc interceptors / sony/gobreaker |
+| ❌ Auth framework | HTTP middleware до `Proxy` |
+| ❌ Caching | HTTP middleware |
+| ❌ Field-level REST exposure (защита от leak новых proto-полей) | отдельный lint tool, не core |
 
 ---
 
@@ -239,17 +268,6 @@ HTTP Response
 4. **Tracing**: `otelhttp.NewMiddleware(...)` снаружи + `otelgrpc` на client → working distributed tracing без framework-specific config.
 5. **Покрытие**: CRUD на одном сервисе (GET by id, list with query, POST, PUT, DELETE).
 6. **Документация**: не больше 20 минут от первого endpoint до running proxy.
-
----
-
-## Roadmap
-
-| Версия | Скоуп |
-|---|---|
-| **v0.1** | Core API: `Proxy` + `bind` + `Map` + `OnSuccess` + базовый error mapping + chi |
-| **v0.2** | Production essentials: metadata forwarding, error details (RFC 7807), `bind.Header`, `Location`, validation hook + `protovalidate` adapter |
-| **v0.3** | Aggregation: `Parallel`, `Call`, `.Optional()`, partial response semantics |
-| **v0.4+** | OpenAPI tooling, gin / echo адаптеры, optional codegen для setter'ов (если ergonomics окажется болью) |
 
 ---
 
