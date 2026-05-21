@@ -202,3 +202,132 @@ func TestProxy_ProtoJSONOutput(t *testing.T) {
 		t.Fatalf("body: got %s want %s", got, want)
 	}
 }
+
+// ===== JSON body binding =====
+
+func TestProxy_JSONBody(t *testing.T) {
+	client := &wrapperClient{}
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /echo", composition.Proxy(client.Echo,
+		bind.JSON[wrapperspb.StringValue](),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// protojson encodes StringValue as a bare JSON string literal.
+	resp, err := http.Post(srv.URL+"/echo", "application/json", strings.NewReader(`"world"`))
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+
+	buf, _ := io.ReadAll(resp.Body)
+	got := strings.TrimSpace(string(buf))
+	want := `"echo:world"`
+	if got != want {
+		t.Fatalf("body: got %s want %s", got, want)
+	}
+}
+
+// ===== Map (response transformation) =====
+
+type UserDTO struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+}
+
+func TestProxy_Map(t *testing.T) {
+	client := &mockClient{}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).Map(func(resp *GetUserResponse) any {
+		return UserDTO{ID: resp.Id, DisplayName: "Mr. " + resp.Name}
+	}))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/users/42")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body UserDTO
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ID != "42" || body.DisplayName != "Mr. User-42" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+// ===== OnSuccess (custom HTTP status) =====
+
+func TestProxy_OnSuccess(t *testing.T) {
+	client := &mockClient{}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).OnSuccess(http.StatusCreated))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/users/42")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: got %d want 201", resp.StatusCode)
+	}
+}
+
+// ===== Custom path extractor (chi compatibility hook) =====
+
+func TestSetDefaultPathExtractor(t *testing.T) {
+	// Replace the extractor so it ignores the actual URL and returns a
+	// fixed value. This proves bind.Path goes through PathExtractor, not
+	// directly through r.PathValue.
+	composition.SetDefaultPathExtractor(func(_ *http.Request, name string) string {
+		return "extracted-" + name
+	})
+	defer composition.SetDefaultPathExtractor(nil) // restore stdlib
+
+	client := &mockClient{}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/users/ignored")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body GetUserResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Despite the URL containing "ignored", the bound Id reflects the
+	// custom extractor's output: "extracted-id".
+	if body.Id != "extracted-id" {
+		t.Fatalf("id: got %q want %q", body.Id, "extracted-id")
+	}
+}

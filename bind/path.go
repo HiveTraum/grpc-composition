@@ -11,14 +11,15 @@ import (
 )
 
 // Path binds a single URL path parameter into the request via the provided
-// setter. It uses [http.Request.PathValue] (Go 1.22+) under the hood.
+// setter. It calls [composition.PathParam] under the hood, which respects
+// any extractor installed via [composition.SetDefaultPathExtractor].
 //
 // Example:
 //
 //	bind.Path("id", func(req *pb.GetUserRequest, v string) { req.Id = v })
 func Path[Req any](name string, setter func(*Req, string)) composition.Binder[Req] {
 	return func(r *http.Request, req *Req) error {
-		setter(req, r.PathValue(name))
+		setter(req, composition.PathParam(r, name))
 		return nil
 	}
 }

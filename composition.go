@@ -28,10 +28,48 @@ type Binder[Req any] func(r *http.Request, req *Req) error
 // from them.
 type UnaryMethod[Req, Resp any] func(ctx context.Context, req *Req, opts ...grpc.CallOption) (*Resp, error)
 
+// PathExtractor reads a single named URL path parameter from a request.
+//
+// The framework calls the [PathExtractor] configured via
+// [SetDefaultPathExtractor]; the default uses [http.Request.PathValue]
+// (Go 1.22+). Routers that store path parameters elsewhere (e.g. chi) can
+// be supported by registering their own extractor at program start:
+//
+//	composition.SetDefaultPathExtractor(chi.URLParam)
+type PathExtractor func(r *http.Request, name string) string
+
+var stdlibPathExtractor PathExtractor = func(r *http.Request, name string) string {
+	return r.PathValue(name)
+}
+
+var defaultPathExtractor = stdlibPathExtractor
+
+// SetDefaultPathExtractor replaces the [PathExtractor] used by bind.Path.
+// Pass nil to restore the standard-library default.
+//
+// Intended to be called once at program startup; not safe for concurrent
+// writes during request handling.
+func SetDefaultPathExtractor(e PathExtractor) {
+	if e == nil {
+		defaultPathExtractor = stdlibPathExtractor
+		return
+	}
+	defaultPathExtractor = e
+}
+
+// PathParam returns the named URL path parameter via the configured
+// [PathExtractor]. Binder constructors in bind/ use this; user code
+// normally does not call it directly.
+func PathParam(r *http.Request, name string) string {
+	return defaultPathExtractor(r, name)
+}
+
 // Route is an [http.Handler] that proxies an HTTP request to a unary gRPC method.
 type Route[Req, Resp any] struct {
-	method  UnaryMethod[Req, Resp]
-	binders []Binder[Req]
+	method        UnaryMethod[Req, Resp]
+	binders       []Binder[Req]
+	mapper        func(*Resp) any
+	successStatus int
 }
 
 // Proxy returns a [Route] that:
@@ -48,9 +86,29 @@ func Proxy[Req, Resp any](
 	binders ...Binder[Req],
 ) *Route[Req, Resp] {
 	return &Route[Req, Resp]{
-		method:  method,
-		binders: binders,
+		method:        method,
+		binders:       binders,
+		successStatus: http.StatusOK,
 	}
+}
+
+// Map installs a response transformer applied between the gRPC call and
+// serialization. Use it when the REST API should expose a different shape
+// than the protobuf response (intentional differentiation).
+//
+// The returned value is serialized via encoding/json — protojson semantics
+// no longer apply once the proto type is left behind.
+func (rt *Route[Req, Resp]) Map(fn func(*Resp) any) *Route[Req, Resp] {
+	rt.mapper = fn
+	return rt
+}
+
+// OnSuccess overrides the HTTP status code written on a successful gRPC
+// call. The default is 200 OK. Useful for POST endpoints that should
+// return 201 Created.
+func (rt *Route[Req, Resp]) OnSuccess(status int) *Route[Req, Resp] {
+	rt.successStatus = status
+	return rt
 }
 
 // ServeHTTP implements [http.Handler].
@@ -72,7 +130,11 @@ func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeResponse(w, http.StatusOK, resp)
+	if rt.mapper != nil {
+		writeJSON(w, rt.successStatus, rt.mapper(resp))
+		return
+	}
+	writeResponse(w, rt.successStatus, resp)
 }
 
 // writeResponse writes resp as protojson when it is a [proto.Message]; this
