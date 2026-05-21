@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package userpb;
+
+option go_package = "github.com/traum-tech/grpc-composition/examples/basic/userpb";
+
+// UserService is a tiny CRUD service used to demonstrate how
+// grpc-composition wires an HTTP API over a unary gRPC client.
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser(CreateUserRequest) returns (User);
+}
+
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message ListUsersRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  int32 total = 2;
+}
+
+message CreateUserRequest {
+  string name = 1;
+  string email = 2;
+}
