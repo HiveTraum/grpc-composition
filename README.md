@@ -171,20 +171,20 @@ Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) → отложе
 
 Легенда: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
-### v0.1 — Core proxy
+### v0.1 — Core proxy ✅ Complete
 
 | Functional Requirement | Status |
 |---|---|
 | `Proxy[Req, Resp]` через generics, type-safe binding | ✅ Done |
 | `bind.Path` (через `r.PathValue`, stdlib 1.22+) | ✅ Done |
 | `bind.Query` | ✅ Done |
+| `bind.JSON` (protojson + generic `proto.Message` constraint) | ✅ Done |
+| Response mapping `Map(func(*Resp) any)` | ✅ Done |
+| HTTP success status override `OnSuccess(int)` | ✅ Done |
 | gRPC `Status` → HTTP code mapping + 5xx redaction | ✅ Done |
 | `protojson` для `proto.Message` ответов | ✅ Done |
-| `bind.JSON` (protojson + generic `proto.Message` constraint) | 📋 Next |
-| Response mapping `Map(func(*Resp) any)` | 📋 Next |
-| HTTP success status override `OnSuccess(int)` | 📋 Next |
-| chi adapter через `SetDefaultPathExtractor` | 📋 Next |
-| Runnable example в `examples/basic/` с реальным `.proto` | 📋 Next |
+| chi-совместимость через `SetDefaultPathExtractor` | ✅ Done |
+| Runnable example в `examples/basic/` (real `.proto` + bufconn) | ✅ Done |
 
 ### v0.2 — Production essentials
 
