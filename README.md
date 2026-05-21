@@ -73,21 +73,37 @@ Internal gRPC services
 ```go
 r.Get("/users/{id}",
     app.Proxy(userClient.GetUser,
-        bind.Path("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
+        bind.Path("id", func(req *pb.GetUserRequest, v string) error {
+            req.Id = v
+            return nil
+        }),
     ),
 )
 ```
 
-### Query params
+Setter принимает raw-строку из path/query и возвращает `error` — это даёт явное место для парсинга в числовые/UUID/time поля и корректного surface'а ошибок как HTTP 400.
+
+### Query params с парсингом
 
 ```go
 r.Get("/users",
     app.Proxy(userClient.ListUsers,
-        bind.Query("limit",  func(req *pb.ListUsersRequest, v string) { /* parse, set */ }),
-        bind.Query("offset", func(req *pb.ListUsersRequest, v string) { /* parse, set */ }),
+        bind.Query("limit", func(req *pb.ListUsersRequest, v string) error {
+            if v == "" {
+                return nil // optional
+            }
+            n, err := strconv.Atoi(v)
+            if err != nil {
+                return fmt.Errorf("limit: %w", err)
+            }
+            req.Limit = int32(n)
+            return nil
+        }),
     ),
 )
 ```
+
+Типизированные сахарные хелперы (`bind.QueryInt32`, `bind.PathUUID`, ...) отложены в v0.2; до тех пор пользователь может завернуть парсер в свой generic helper (см. `examples/basic/main.go`, функция `parseInt32`).
 
 ### JSON body + path
 
@@ -95,12 +111,15 @@ r.Get("/users",
 r.Post("/orgs/{org_id}/members",
     app.Proxy(orgClient.AddMember,
         bind.JSON[pb.AddMemberRequest](),
-        bind.Path("org_id", func(req *pb.AddMemberRequest, v string) { req.OrgId = v }),
+        bind.Path("org_id", func(req *pb.AddMemberRequest, v string) error {
+            req.OrgId = v
+            return nil
+        }),
     ),
 )
 ```
 
-Биндеры применяются в порядке указания — explicit composition.
+Биндеры применяются в порядке указания — explicit composition. Если любой setter возвращает error, gRPC-вызов не происходит, клиент получает HTTP 400 с сообщением.
 
 ### Response mapping (intentional differentiation)
 
@@ -136,7 +155,10 @@ userConn, _ := grpc.NewClient(addr,
 userClient := pb.NewUserServiceClient(userConn)
 
 r.Get("/users/{id}", app.Proxy(userClient.GetUser,
-    bind.Path("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
+    bind.Path("id", func(req *pb.GetUserRequest, v string) error {
+        req.Id = v
+        return nil
+    }),
 ))
 ```
 

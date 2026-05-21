@@ -3,6 +3,7 @@ package composition_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -60,7 +61,7 @@ func TestProxy_PathBinding(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
-		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+		bind.Path("id", func(req *GetUserRequest, v string) error { req.Id = v; return nil }),
 	))
 
 	srv := httptest.NewServer(mux)
@@ -90,9 +91,13 @@ func TestProxy_QueryBinding(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /users", composition.Proxy(client.ListUsers,
-		bind.Query("limit", func(req *ListUsersRequest, v string) {
-			n, _ := strconv.Atoi(v)
+		bind.Query("limit", func(req *ListUsersRequest, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return err
+			}
 			req.Limit = int32(n)
+			return nil
 		}),
 	))
 
@@ -141,7 +146,7 @@ func TestProxy_GRPCErrorMapping(t *testing.T) {
 
 			mux := http.NewServeMux()
 			mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
-				bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+				bind.Path("id", func(req *GetUserRequest, v string) error { req.Id = v; return nil }),
 			))
 
 			srv := httptest.NewServer(mux)
@@ -181,7 +186,7 @@ func TestProxy_ProtoJSONOutput(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /echo/{v}", composition.Proxy(client.Echo,
-		bind.Path("v", func(req *wrapperspb.StringValue, v string) { req.Value = v }),
+		bind.Path("v", func(req *wrapperspb.StringValue, v string) error { req.Value = v; return nil }),
 	))
 
 	srv := httptest.NewServer(mux)
@@ -247,7 +252,7 @@ func TestProxy_Map(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
-		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+		bind.Path("id", func(req *GetUserRequest, v string) error { req.Id = v; return nil }),
 	).Map(func(resp *GetUserResponse) any {
 		return UserDTO{ID: resp.Id, DisplayName: "Mr. " + resp.Name}
 	}))
@@ -277,7 +282,7 @@ func TestProxy_OnSuccess(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
-		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+		bind.Path("id", func(req *GetUserRequest, v string) error { req.Id = v; return nil }),
 	).OnSuccess(http.StatusCreated))
 
 	srv := httptest.NewServer(mux)
@@ -291,6 +296,47 @@ func TestProxy_OnSuccess(t *testing.T) {
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status: got %d want 201", resp.StatusCode)
+	}
+}
+
+// ===== Binder error propagation =====
+
+// When a setter returns an error (e.g. parse failure), the framework must
+// short-circuit, skip the gRPC call, and return HTTP 400 with the message.
+func TestProxy_BinderError(t *testing.T) {
+	client := &mockClient{}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users", composition.Proxy(client.ListUsers,
+		bind.Query("limit", func(req *ListUsersRequest, v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("limit: %w", err)
+			}
+			req.Limit = int32(n)
+			return nil
+		}),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/users?limit=notanumber")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body["error"], "limit") {
+		t.Fatalf("error: got %q want one containing %q", body["error"], "limit")
 	}
 }
 
@@ -309,7 +355,7 @@ func TestSetDefaultPathExtractor(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
-		bind.Path("id", func(req *GetUserRequest, v string) { req.Id = v }),
+		bind.Path("id", func(req *GetUserRequest, v string) error { req.Id = v; return nil }),
 	))
 
 	srv := httptest.NewServer(mux)
