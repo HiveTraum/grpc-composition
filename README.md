@@ -190,22 +190,47 @@ app.Proxy(userClient.CreateUser, bindCreate).
 ### Application setup
 
 ```go
+// App carries cross-cutting concerns (currently HTTP→gRPC metadata
+// forwarding). Wrap the router with app.Handler to apply them globally.
 app := composition.New(
-    composition.WithErrorMapper(myMapper), // optional
+    composition.WithMetadataForward("authorization", "x-request-id", "accept-language"),
 )
 
-r := chi.NewRouter()
-r.Use(otelhttp.NewMiddleware("api")) // tracing — standard middleware
+// Optional: customize the package-level error mapper (defaults to RFC 7807).
+// Per-route override is also available: route.WithErrorMapper(fn).
+composition.SetDefaultErrorMapper(myMapper)
+
+r := http.NewServeMux()
 
 userConn, _ := grpc.NewClient(addr,
     grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 )
 userClient := pb.NewUserServiceClient(userConn)
 
-r.Get("/users/{id}", app.Proxy(userClient.GetUser,
+r.Handle("GET /users/{id}", composition.Proxy(userClient.GetUser,
     bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
 ))
+
+// Wrap with app.Handler so the configured headers flow into outgoing
+// gRPC metadata; combine with otelhttp on the outside for tracing.
+handler := otelhttp.NewMiddleware("api")(app.Handler(r))
+http.ListenAndServe(":8080", handler)
 ```
+
+### HTTP → gRPC metadata forwarding
+
+`composition.WithMetadataForward(headers...)` declares an **explicit allowlist** of HTTP request headers to forward into outgoing gRPC metadata. There is no wildcard — listing what flows downstream is the safe default.
+
+```go
+app := composition.New(
+    composition.WithMetadataForward("Authorization", "X-Request-ID"),
+)
+handler := app.Handler(mux)
+```
+
+Header names are matched case-insensitively. Multi-value headers preserve all values. The forwarded headers reach any gRPC method called via `Proxy` because the framework hands `r.Context()` to the gRPC client, and `app.Handler` injected outgoing metadata into that context.
+
+Use this for auth tokens, request-id correlation, locale (`Accept-Language`), tenant ids, etc.
 
 ---
 
@@ -288,7 +313,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`) | ✅ Done |
 | Body family rename + DTO variants (`bind.BodyJSON`, `bind.BodyJSONInto`, `bind.BodyJSONMap`, `bind.Body`); renames `bind.JSON` → `bind.BodyJSON` (breaking) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
-| Metadata forwarding (HTTP header → gRPC metadata, allowlist) | ⏳ Planned |
+| Metadata forwarding (HTTP header → gRPC metadata, allowlist) via `App.Handler` | ✅ Done |
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) + `application/problem+json` | ✅ Done |
 | `WithErrorMapper` per-route + `SetDefaultErrorMapper` package-level | ✅ Done |
 | Additional typed sugar for `Float64`, `UUID`, `time.Time` | ⏳ Planned |

@@ -14,6 +14,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -938,5 +939,99 @@ func TestSetDefaultErrorMapper(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	if body["custom"] != "yes" {
 		t.Fatalf("body: %+v", body)
+	}
+}
+
+// ===== App + metadata forwarding =====
+
+// captureClient stores the outgoing gRPC metadata seen at invocation
+// time, so tests can assert which headers got forwarded.
+type captureClient struct {
+	captured metadata.MD
+}
+
+func (c *captureClient) Echo(ctx context.Context, req *wrapperspb.StringValue, _ ...grpc.CallOption) (*wrapperspb.StringValue, error) {
+	md, _ := metadata.FromOutgoingContext(ctx)
+	c.captured = md.Copy()
+	return &wrapperspb.StringValue{Value: req.Value}, nil
+}
+
+func TestApp_MetadataForward(t *testing.T) {
+	app := composition.New(
+		composition.WithMetadataForward("Authorization", "X-Request-ID"),
+	)
+
+	client := &captureClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /echo/{v}", composition.Proxy(client.Echo,
+		bind.PathString("v", func(req *wrapperspb.StringValue, v string) { req.Value = v }),
+	))
+	srv := httptest.NewServer(app.Handler(mux))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/echo/hi", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	req.Header.Set("X-Request-ID", "req-42")
+	req.Header.Set("X-Not-Forwarded", "should-not-leak")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := client.captured.Get("authorization"); len(got) != 1 || got[0] != "Bearer secret-token" {
+		t.Fatalf("authorization: %v", got)
+	}
+	if got := client.captured.Get("x-request-id"); len(got) != 1 || got[0] != "req-42" {
+		t.Fatalf("x-request-id: %v", got)
+	}
+	if got := client.captured.Get("x-not-forwarded"); len(got) != 0 {
+		t.Fatalf("x-not-forwarded must NOT be forwarded: %v", got)
+	}
+}
+
+func TestApp_NoForwarding_PassThrough(t *testing.T) {
+	// App with no forwarding should return inner handler unchanged
+	// and not add any outgoing metadata.
+	app := composition.New()
+
+	client := &captureClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /echo/{v}", composition.Proxy(client.Echo,
+		bind.PathString("v", func(req *wrapperspb.StringValue, v string) { req.Value = v }),
+	))
+	srv := httptest.NewServer(app.Handler(mux))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/echo/hi", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	resp, _ := http.DefaultClient.Do(req)
+	defer resp.Body.Close()
+
+	if len(client.captured) != 0 {
+		t.Fatalf("expected empty outgoing md, got %v", client.captured)
+	}
+}
+
+func TestApp_MetadataForward_MultipleValues(t *testing.T) {
+	// Multi-value headers (Accept-Language: en, ru) preserve all values.
+	app := composition.New(composition.WithMetadataForward("Accept-Language"))
+
+	client := &captureClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /echo/{v}", composition.Proxy(client.Echo,
+		bind.PathString("v", func(req *wrapperspb.StringValue, v string) { req.Value = v }),
+	))
+	srv := httptest.NewServer(app.Handler(mux))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/echo/hi", nil)
+	req.Header.Add("Accept-Language", "en")
+	req.Header.Add("Accept-Language", "ru")
+	resp, _ := http.DefaultClient.Do(req)
+	defer resp.Body.Close()
+
+	if got := client.captured.Get("accept-language"); len(got) != 2 || got[0] != "en" || got[1] != "ru" {
+		t.Fatalf("accept-language: %v", got)
 	}
 }
