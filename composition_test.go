@@ -1197,3 +1197,210 @@ func TestPathFloat64_QueryFloat64(t *testing.T) {
 		}
 	})
 }
+
+// ===== Aggregate handler =====
+
+func TestAggregate_ReturnsProtoMessage(t *testing.T) {
+	// Aggregator that returns a proto message — should serialize via
+	// protojson and 200 by default.
+	mux := http.NewServeMux()
+	mux.Handle("GET /agg", composition.Aggregate(
+		func(ctx context.Context, r *http.Request) (any, error) {
+			return &wrapperspb.StringValue{Value: "from-aggregate"}, nil
+		},
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/agg")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	buf, _ := io.ReadAll(resp.Body)
+	got := strings.TrimSpace(string(buf))
+	// protojson encodes StringValue as a bare JSON string literal.
+	if got != `"from-aggregate"` {
+		t.Fatalf("body: got %s", got)
+	}
+}
+
+func TestAggregate_ReturnsCustomStruct(t *testing.T) {
+	type FeedResponse struct {
+		User  string   `json:"user"`
+		Posts []string `json:"posts"`
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /feed", composition.Aggregate(
+		func(ctx context.Context, r *http.Request) (any, error) {
+			return FeedResponse{User: "alice", Posts: []string{"p1", "p2"}}, nil
+		},
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/feed")
+	defer resp.Body.Close()
+	buf, _ := io.ReadAll(resp.Body)
+	got := strings.TrimSpace(string(buf))
+	const want = `{"user":"alice","posts":["p1","p2"]}`
+	if got != want {
+		t.Fatalf("body: got %s want %s", got, want)
+	}
+}
+
+func TestAggregate_OnSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("POST /resources", composition.Aggregate(
+		func(ctx context.Context, r *http.Request) (any, error) {
+			return map[string]string{"id": "42"}, nil
+		},
+	).OnSuccess(http.StatusCreated))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Post(srv.URL+"/resources", "application/json", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status: got %d want 201", resp.StatusCode)
+	}
+}
+
+func TestAggregate_GRPCError(t *testing.T) {
+	// Aggregator returns a gRPC error — should hit DefaultErrorMapper
+	// (RFC 7807) and produce application/problem+json.
+	mux := http.NewServeMux()
+	mux.Handle("GET /agg", composition.Aggregate(
+		func(ctx context.Context, r *http.Request) (any, error) {
+			return nil, status.Error(codes.NotFound, "thing missing")
+		},
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/agg")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d want 404", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+		t.Fatalf("content-type: %q", ct)
+	}
+	var prob composition.ProblemDetails
+	_ = json.NewDecoder(resp.Body).Decode(&prob)
+	if prob.Detail != "thing missing" {
+		t.Fatalf("detail: %q", prob.Detail)
+	}
+}
+
+func TestAggregate_NonGRPCErrorMappedToInternal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("GET /agg", composition.Aggregate(
+		func(ctx context.Context, r *http.Request) (any, error) {
+			return nil, fmt.Errorf("something bad happened with credentials") // plain error
+		},
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/agg")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500", resp.StatusCode)
+	}
+	var prob composition.ProblemDetails
+	_ = json.NewDecoder(resp.Body).Decode(&prob)
+	// 5xx redacts upstream detail — plain error message must NOT leak.
+	if strings.Contains(prob.Detail, "credentials") {
+		t.Fatalf("upstream detail leaked into 5xx: %q", prob.Detail)
+	}
+}
+
+func TestAggregate_WithErrorMapper(t *testing.T) {
+	legacy := func(err error) (int, any) {
+		return 418, map[string]string{"legacy": "yes"}
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /agg", composition.Aggregate(
+		func(ctx context.Context, r *http.Request) (any, error) {
+			return nil, status.Error(codes.NotFound, "x")
+		},
+	).WithErrorMapper(legacy))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/agg")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTeapot {
+		t.Fatalf("status: got %d want 418", resp.StatusCode)
+	}
+}
+
+// ===== HeaderEnum =====
+
+func TestHeaderEnum(t *testing.T) {
+	type RoleReq struct {
+		R descriptorpb.FieldDescriptorProto_Label
+	}
+	type RoleResp struct {
+		R descriptorpb.FieldDescriptorProto_Label
+	}
+	echo := func(_ context.Context, req *RoleReq, _ ...grpc.CallOption) (*RoleResp, error) {
+		return &RoleResp{R: req.R}, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /e", composition.Proxy(echo,
+		bind.HeaderEnum("X-Label", func(req *RoleReq, v descriptorpb.FieldDescriptorProto_Label) { req.R = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("present by name", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", srv.URL+"/e", nil)
+		req.Header.Set("X-Label", "LABEL_REPEATED")
+		resp, _ := http.DefaultClient.Do(req)
+		defer resp.Body.Close()
+		var body RoleResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.R != descriptorpb.FieldDescriptorProto_LABEL_REPEATED {
+			t.Fatalf("label: got %v", body.R)
+		}
+	})
+
+	t.Run("present by number", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", srv.URL+"/e", nil)
+		req.Header.Set("X-Label", "2") // LABEL_REQUIRED
+		resp, _ := http.DefaultClient.Do(req)
+		defer resp.Body.Close()
+		var body RoleResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.R != descriptorpb.FieldDescriptorProto_LABEL_REQUIRED {
+			t.Fatalf("label: got %v", body.R)
+		}
+	})
+
+	t.Run("absent → zero", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/e")
+		defer resp.Body.Close()
+		var body RoleResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if int32(body.R) != 0 {
+			t.Fatalf("label: got %v want zero", body.R)
+		}
+	})
+
+	t.Run("invalid → 400", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", srv.URL+"/e", nil)
+		req.Header.Set("X-Label", "label_required") // lowercase rejected
+		resp, _ := http.DefaultClient.Do(req)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+	})
+}

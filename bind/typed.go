@@ -254,6 +254,29 @@ func QueryEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composit
 	}
 }
 
+// HeaderEnum binds an optional HTTP header to a protobuf enum field.
+// A missing or empty header leaves the field at its zero value
+// (typically the *_UNSPECIFIED variant). Otherwise the same matching
+// rules as [PathEnum] apply: canonical proto name (case-sensitive) or
+// numeric value, invalid input → HTTP 400.
+//
+//	bind.HeaderEnum("X-Role", func(req *pb.Req, v pb.Role) { req.Role = v })
+func HeaderEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composition.Binder[Req] {
+	return func(r *http.Request, req *Req) error {
+		raw := r.Header.Get(name)
+		if raw == "" {
+			return nil
+		}
+		var zero T
+		n, err := lookupEnum(zero.Descriptor(), raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		setter(req, T(n))
+		return nil
+	}
+}
+
 func lookupEnum(desc protoreflect.EnumDescriptor, raw string) (protoreflect.EnumNumber, error) {
 	if v := desc.Values().ByName(protoreflect.Name(raw)); v != nil {
 		return v.Number(), nil

@@ -107,9 +107,9 @@ Available helpers:
 
 - **Path**: `PathString`, `PathInt32`, `PathInt64`, `PathFloat64`, `PathBool`, `PathEnum`, `PathAs`
 - **Query**: `QueryString`, `QueryInt32`, `QueryInt64`, `QueryFloat64`, `QueryBool`, `QueryEnum`, `QueryAs`
-- **Header**: `HeaderString`, `HeaderInt32`, `HeaderInt64`, `HeaderFloat64`, `HeaderBool`, `HeaderAs` (plus generic `Header` with error)
+- **Header**: `HeaderString`, `HeaderInt32`, `HeaderInt64`, `HeaderFloat64`, `HeaderBool`, `HeaderEnum`, `HeaderAs` (plus generic `Header` with error)
 
-UUID / time — through `*As` with a user-supplied parser. `HeaderEnum` is planned for v0.3.
+UUID / time — through `*As` with a user-supplied parser.
 
 ### Protobuf enums
 
@@ -192,6 +192,43 @@ Without `Map` — straight `protojson` (proto-by-default). With `Map` — your s
 app.Proxy(userClient.CreateUser, bindCreate).
     OnSuccess(http.StatusCreated)
 ```
+
+### Aggregate — custom handlers with framework error mapping
+
+When an endpoint needs to call multiple gRPC services and assemble a combined response, `Proxy` does not fit (there is no one-to-one HTTP↔gRPC mapping). `Aggregate` wraps a custom handler with the same RFC 7807 error mapping and response serialization that `Proxy` uses:
+
+```go
+mux.Handle("GET /feed/{user_id}", composition.Aggregate(
+    func(ctx context.Context, r *http.Request) (any, error) {
+        uid := r.PathValue("user_id")
+
+        g, gctx := errgroup.WithContext(ctx)
+        var user *pb.User
+        var posts *pb.ListPostsResponse
+        g.Go(func() error {
+            u, err := users.GetUser(gctx, &pb.GetUserRequest{Id: uid})
+            if err != nil { return err }
+            user = u
+            return nil
+        })
+        g.Go(func() error {
+            p, err := postClient.ListPosts(gctx, &pb.ListPostsRequest{UserId: uid})
+            if err != nil { return err }
+            posts = p
+            return nil
+        })
+        if err := g.Wait(); err != nil {
+            return nil, err
+        }
+
+        return FeedResponse{User: user, Posts: posts.Posts}, nil
+    },
+).OnSuccess(http.StatusOK))
+```
+
+The handler's error path flows through `DefaultErrorMapper` — same RFC 7807 / 5xx redaction / per-route override (`.WithErrorMapper(fn)`) story as `Proxy`. On success, the returned value is serialized with `protojson` if it implements `proto.Message`, otherwise `encoding/json`.
+
+**No parallelism primitives are shipped.** `errgroup` (stdlib), [`sourcegraph/conc`](https://github.com/sourcegraph/conc), and [`samber/ro`](https://github.com/samber/ro) (ReactiveX) all cover that space well; pick what fits your codebase.
 
 ### Application setup
 
@@ -326,13 +363,17 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
 > **Validation:** use [`protovalidate-go`](https://github.com/bufbuild/protovalidate-go) as a gRPC unary client interceptor. Violations arrive as `codes.InvalidArgument` with `status.WithDetails(*errdetails.BadRequest)` and surface as HTTP 400 field errors via RFC 7807 error details (see above). No framework-level hook is needed.
 
-### v0.3 — Aggregation
+### v0.3 — Aggregation & header enums ✅ Complete
 
 | Functional Requirement | Status |
 |---|---|
-| `Aggregate(func)` for custom handlers | ⏳ Planned |
-| `Parallel` + `Call` helpers with errgroup semantics | ⏳ Planned |
-| `.Optional()` for partial responses | ⏳ Planned |
+| `Aggregate(func)` for custom handlers with framework error mapping & serialization | ✅ Done |
+| `HeaderEnum` typed binder (promoted from v0.4+) | ✅ Done |
+
+Notes:
+
+- **Parallelism is deliberately not framework concern.** `errgroup` (stdlib), [`sourcegraph/conc`](https://github.com/sourcegraph/conc), and [`samber/ro`](https://github.com/samber/ro) (ReactiveX `Future` + `CombineLatestN`) all cover that space well — they live one import away and the framework would only add boilerplate-shifted-elsewhere.
+- **Cookbook for aggregation patterns** will be added to the README when there is a real user request — the `Aggregate` example above is the load-bearing one for now.
 
 ### v0.4+ — Sugar & tooling
 
@@ -343,7 +384,6 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | Optional codegen for setters (if ergonomics turn out to be a real pain point) | ⏳ Planned |
 | Multipart / file upload (`bind.Multipart`) | ⏳ Planned |
 | `Binder` metadata refactor (struct with `PathParam` / `QueryParam` fields) + `Mount` helper that validates declared path params against the route pattern at startup, catching binder/pattern mismatches at boot rather than first request | ⏳ Planned |
-| `HeaderEnum` typed binder (deferred from v0.2 along with other header infrastructure) | ⏳ Planned |
 | Typed sugar for `UUID`, `time.Time` (need external dep + format-choice decisions) | ⏳ Planned |
 
 ### Out of scope (explicit non-goals)
