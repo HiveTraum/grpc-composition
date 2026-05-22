@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/traum-tech/grpc-composition"
+	"github.com/HiveTraum/grpc-composition"
 )
 
 // PathAs binds a path parameter parsed via the supplied function.

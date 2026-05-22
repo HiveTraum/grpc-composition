@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package userpb;
 
-option go_package = "github.com/traum-tech/grpc-composition/examples/basic/userpb";
+option go_package = "github.com/HiveTraum/grpc-composition/examples/basic/userpb";
 
 // UserService is a tiny CRUD service used to demonstrate how
 // grpc-composition wires an HTTP API over a unary gRPC client.

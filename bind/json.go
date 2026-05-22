@@ -4,7 +4,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/traum-tech/grpc-composition"
+	"github.com/HiveTraum/grpc-composition"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )

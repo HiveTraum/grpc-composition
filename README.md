@@ -1,26 +1,26 @@
 # grpc-composition
 
-Lightweight Go framework для построения API Composition / BFF layer поверх unary gRPC сервисов.
+Lightweight Go framework for building an API Composition / BFF layer on top of unary gRPC services.
 
-Репозиторий содержит и код фреймворка, и продуктовое видение. Актуальный статус реализации — см. секцию [Implementation Status](#implementation-status).
+This repository contains both the framework code and its product vision. For the current state of the implementation see the [Implementation Status](#implementation-status) section.
 
 ---
 
 ## Position
 
-Тонкий, opinionated Go-слой между HTTP и unary gRPC, который:
+A thin, opinionated Go layer between HTTP and unary gRPC that:
 
-- режет boilerplate в proxy-endpoint'ах через **generics + typed callbacks** (не runtime reflection, не magic strings)
-- остаётся неинвазивным: не управляет DI, config, connection lifecycle, auth
-- разделяет concerns: compat ловится `buf`'ом, observability — стандартными OTel middleware'ами, framework отвечает только за HTTP↔gRPC
+- cuts boilerplate from proxy endpoints through **generics + typed callbacks** (no runtime reflection, no magic strings)
+- stays non-invasive: does not own DI, config, connection lifecycle, or auth
+- splits concerns: compatibility is caught by `buf`, observability comes from standard OTel middlewares, the framework only handles HTTP↔gRPC
 
-**Слоган:** *Composition owns routing and binding. Protobuf owns the wire. `buf` owns the compatibility. OTel middlewares own the tracing.*
+**Tagline:** *Composition owns routing and binding. Protobuf owns the wire. `buf` owns the compatibility. OTel middlewares own the tracing.*
 
 ---
 
 ## Problem
 
-В microservice-архитектуре часто появляется слой:
+A microservice architecture commonly ends up with this layer:
 
 ```
 Clients
@@ -30,45 +30,45 @@ REST / BFF / API Composition
 Internal gRPC services
 ```
 
-Существующие подходы:
+Existing approaches:
 
 **grpc-gateway**
-- требует REST-аннотации в `.proto`
-- HTTP concerns текут в internal contracts
-- сложно независимо эволюционировать REST API
-- aggregation/composition неудобны
+- requires REST annotations in `.proto`
+- HTTP concerns leak into internal contracts
+- hard to evolve the REST API independently
+- aggregation / composition is awkward
 
-**Ручной composition layer**
-- огромное количество boilerplate
+**Hand-rolled composition layer**
+- enormous amounts of boilerplate
 - repetitive handlers / binding / error handling
-- сложно поддерживать consistency
+- hard to keep consistent
 
-**Цель grpc-composition** — дать тонкий слой, который убирает boilerplate, но не тащит с собой ни аннотаций в proto, ни тяжёлой framework-инфраструктуры.
+**The goal of grpc-composition** is to provide a thin layer that removes the boilerplate without dragging in proto annotations or heavyweight framework infrastructure.
 
 ---
 
-## Базовые допущения
+## Base assumptions
 
-1. **gRPC contract compatibility — внешний concern.** Используется `buf breaking` / `protolock` / equivalent. Framework не проверяет совместимость proto.
-2. **Wire format — `protojson`.** Корректно обрабатывает `oneof`, well-known types (`Timestamp`, `Duration`, `FieldMask`), presence semantics.
-3. **Connection lifecycle — пользовательский.** `*grpc.ClientConn` создаётся снаружи и передаётся в generated clients. Framework их не оборачивает.
-4. **Distributed tracing — через стандартные middlewares.** `otelhttp.NewHandler(...)` снаружи + `otelgrpc.UnaryClientInterceptor()` на grpc client. Framework только пробрасывает `r.Context()` в grpc invocation — propagation работает сам.
+1. **gRPC contract compatibility is an external concern.** Use `buf breaking` / `protolock` / equivalent. The framework does not police proto compatibility.
+2. **The wire format is `protojson`.** It handles `oneof`, well-known types (`Timestamp`, `Duration`, `FieldMask`), and presence semantics correctly.
+3. **Connection lifecycle is yours.** `*grpc.ClientConn` is created outside and passed into the generated clients. The framework does not wrap them.
+4. **Distributed tracing comes from standard middlewares.** `otelhttp.NewHandler(...)` on the outside + `otelgrpc.UnaryClientInterceptor()` on the gRPC client. The framework only propagates `r.Context()` into the gRPC invocation — span propagation works on its own.
 
 ---
 
 ## Core Principles
 
-1. **Code-first, не config-first.** Fluent Go API, не YAML DSL.
-2. **Type safety over conciseness.** Magic strings → setter callbacks. Переименование поля в proto = compile error в роуте.
-3. **No per-request reflection.** Биндинг резолвится через generics и closures на старте; runtime hot path — без descriptor walking.
-4. **Proto-by-default.** REST shape совпадает с proto shape, пока вы явно не сказали иначе через `Map`/`Bind`. `Map` — для intentional API differentiation, не для safety.
-5. **Incremental adoption.** Endpoint-by-endpoint миграция поверх существующего роутера.
+1. **Code-first, not config-first.** Fluent Go API, not a YAML DSL.
+2. **Type safety over conciseness.** Magic strings → setter callbacks. Renaming a proto field becomes a compile error in the route.
+3. **No per-request reflection.** Binding resolves through generics and closures at startup; the runtime hot path has no descriptor walking.
+4. **Proto-by-default.** The REST shape matches the proto shape unless you explicitly opt out via `Map` / custom binders. `Map` is for *intentional* API differentiation, not safety.
+5. **Incremental adoption.** Endpoint-by-endpoint migration on top of an existing router.
 
 ---
 
 ## Core API
 
-### Простой proxy
+### Simple proxy
 
 ```go
 r.Get("/users/{id}",
@@ -81,9 +81,9 @@ r.Get("/users/{id}",
 )
 ```
 
-Setter принимает raw-строку из path/query и возвращает `error` — это даёт явное место для парсинга в числовые/UUID/time поля и корректного surface'а ошибок как HTTP 400.
+The setter receives the raw string from the path / query and returns `error`. This gives an explicit place to parse into numeric, UUID, or time fields and to surface errors as HTTP 400.
 
-### Query params с типизированным парсингом
+### Query params with typed parsing
 
 ```go
 r.Get("/users",
@@ -94,7 +94,7 @@ r.Get("/users",
 )
 ```
 
-Для типов вне готового набора — generic `bind.PathAs` / `bind.QueryAs` с произвольным парсером:
+For types outside the typed-sugar set, use generic `bind.PathAs` / `bind.QueryAs` with your own parser:
 
 ```go
 bind.PathAs("user_id", uuid.Parse, func(req *pb.Req, v uuid.UUID) {
@@ -102,11 +102,11 @@ bind.PathAs("user_id", uuid.Parse, func(req *pb.Req, v uuid.UUID) {
 })
 ```
 
-Парс-ошибки автоматически бабблят как HTTP 400 с префиксом имени параметра, например: `{"error":"bind: limit: strconv.ParseInt: parsing \"oops\": invalid syntax"}`.
+Parse errors automatically bubble up as HTTP 400 with the parameter name as a prefix, e.g. `{"error":"bind: limit: strconv.ParseInt: parsing \"oops\": invalid syntax"}`.
 
-**Семантическое отличие:** `Path*` ожидает обязательный параметр (пустое значение → 400), `Query*` опционален (пустое → поле остаётся zero, ошибки нет).
+**Semantic difference:** `Path*` treats the parameter as required (an empty value yields a 400); `Query*` is optional (an empty value leaves the field at zero, no error).
 
-Готовые хелперы: `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`. UUID/time/float — пока через `*As` с пользовательским парсером.
+Available helpers: `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`. UUID / time / float — through `*As` with a user-supplied parser for now.
 
 ### JSON body + path
 
@@ -122,7 +122,7 @@ r.Post("/orgs/{org_id}/members",
 )
 ```
 
-Биндеры применяются в порядке указания — explicit composition. Если любой setter возвращает error, gRPC-вызов не происходит, клиент получает HTTP 400 с сообщением.
+Binders run in the order given — explicit composition. If any setter returns an error, the gRPC call does not happen and the client receives HTTP 400 with the message.
 
 ### Response mapping (intentional differentiation)
 
@@ -133,7 +133,7 @@ app.Proxy(userClient.GetUser, bindGetUser).
     })
 ```
 
-Без `Map` — `protojson` напрямую (proto-by-default). С `Map` — ваш shape под вашу ответственность.
+Without `Map` — straight `protojson` (proto-by-default). With `Map` — your shape, your responsibility.
 
 ### HTTP status code
 
@@ -146,11 +146,11 @@ app.Proxy(userClient.CreateUser, bindCreate).
 
 ```go
 app := composition.New(
-    composition.WithErrorMapper(myMapper), // опционально
+    composition.WithErrorMapper(myMapper), // optional
 )
 
 r := chi.NewRouter()
-r.Use(otelhttp.NewMiddleware("api")) // tracing — стандартный middleware
+r.Use(otelhttp.NewMiddleware("api")) // tracing — standard middleware
 
 userConn, _ := grpc.NewClient(addr,
     grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
@@ -186,30 +186,30 @@ Canceled           -> 499
 Internal/Unknown   -> 500
 ```
 
-5xx по умолчанию **не** проксируют gRPC status message наружу — только request-id для корреляции с логами. Кастомизация — через `WithErrorMapper`.
+5xx responses do **not** propagate the upstream gRPC status message — they return a generic "internal error" so the client gets only a request-id for log correlation. Customize via `WithErrorMapper`.
 
-Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) → отложены в v0.2.
+Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) — deferred to v0.2.
 
 ---
 
 ## Implementation Status
 
-Легенда: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
+Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
 ### v0.1 — Core proxy ✅ Complete
 
 | Functional Requirement | Status |
 |---|---|
-| `Proxy[Req, Resp]` через generics, type-safe binding | ✅ Done |
-| `bind.Path` (через `r.PathValue`, stdlib 1.22+) | ✅ Done |
+| `Proxy[Req, Resp]` via generics, type-safe binding | ✅ Done |
+| `bind.Path` (via `r.PathValue`, stdlib 1.22+) | ✅ Done |
 | `bind.Query` | ✅ Done |
 | `bind.JSON` (protojson + generic `proto.Message` constraint) | ✅ Done |
 | Response mapping `Map(func(*Resp) any)` | ✅ Done |
 | HTTP success status override `OnSuccess(int)` | ✅ Done |
 | gRPC `Status` → HTTP code mapping + 5xx redaction | ✅ Done |
-| `protojson` для `proto.Message` ответов | ✅ Done |
-| chi-совместимость через `SetDefaultPathExtractor` | ✅ Done |
-| Runnable example в `examples/basic/` (real `.proto` + bufconn) | ✅ Done |
+| `protojson` serialization for `proto.Message` responses | ✅ Done |
+| chi compatibility via `SetDefaultPathExtractor` | ✅ Done |
+| Runnable example in `examples/basic/` (real `.proto` + bufconn) | ✅ Done |
 
 ### v0.2 — Production essentials
 
@@ -217,40 +217,40 @@ Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) → отложе
 |---|---|
 | Typed sugar binders (`PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
-| `Location` builder для POST → 201 | ⏳ Planned |
+| `Location` builder for POST → 201 | ⏳ Planned |
 | Validation hook + `protovalidate` adapter | ⏳ Planned |
-| Metadata forwarding (HTTP header → grpc metadata, allowlist) | ⏳ Planned |
+| Metadata forwarding (HTTP header → gRPC metadata, allowlist) | ⏳ Planned |
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) | ⏳ Planned |
-| `WithErrorMapper` для per-route override | ⏳ Planned |
-| Дополнительные typed-sugar для `Float64`, `UUID`, `time.Time` | ⏳ Planned |
+| `WithErrorMapper` per-route override | ⏳ Planned |
+| Additional typed sugar for `Float64`, `UUID`, `time.Time` | ⏳ Planned |
 
 ### v0.3 — Aggregation
 
 | Functional Requirement | Status |
 |---|---|
-| `Aggregate(func)` для custom handlers | ⏳ Planned |
-| `Parallel` + `Call` helpers с errgroup-семантикой | ⏳ Planned |
-| `.Optional()` для partial-response | ⏳ Planned |
+| `Aggregate(func)` for custom handlers | ⏳ Planned |
+| `Parallel` + `Call` helpers with errgroup semantics | ⏳ Planned |
+| `.Optional()` for partial responses | ⏳ Planned |
 
 ### v0.4+ — Sugar & tooling
 
 | Functional Requirement | Status |
 |---|---|
-| OpenAPI генерация из binder metadata | ⏳ Planned |
-| gin / echo адаптеры | ⏳ Planned |
-| Optional codegen для setter'ов (если ergonomics окажется болью) | ⏳ Planned |
+| OpenAPI generation from binder metadata | ⏳ Planned |
+| gin / echo adapters | ⏳ Planned |
+| Optional codegen for setters (if ergonomics turn out to be a real pain point) | ⏳ Planned |
 | Multipart / file upload (`bind.Multipart`) | ⏳ Planned |
 
-### Out of scope (явно не делаем)
+### Out of scope (explicit non-goals)
 
-| Feature | Куда смотреть |
+| Feature | Where to look instead |
 |---|---|
-| ❌ Streaming / SSE / WebSockets | Connect-Go или ручной handler |
-| ❌ Retries | grpc client interceptors |
-| ❌ Circuit breakers | grpc interceptors / sony/gobreaker |
-| ❌ Auth framework | HTTP middleware до `Proxy` |
+| ❌ Streaming / SSE / WebSockets | Connect-Go or a hand-rolled handler |
+| ❌ Retries | gRPC client interceptors |
+| ❌ Circuit breakers | gRPC interceptors / sony/gobreaker |
+| ❌ Auth framework | HTTP middleware in front of `Proxy` |
 | ❌ Caching | HTTP middleware |
-| ❌ Field-level REST exposure (защита от leak новых proto-полей) | отдельный lint tool, не core |
+| ❌ Field-level REST exposure (guard against leaking new proto fields) | Separate lint tool, not core |
 
 ---
 
@@ -259,9 +259,9 @@ Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) → отложе
 ```
 HTTP Request
     ↓
-Binders (typed closures, generic'нутые по Req)
+Binders (typed closures, generic over Req)
     ↓
-gRPC unary invocation (с r.Context() — даёт span propagation через otelgrpc)
+gRPC unary invocation (with r.Context() — span propagation via otelgrpc)
     ↓
 Error mapper (Status → HTTP code)  |  Response mapper (optional Map)
     ↓
@@ -270,7 +270,7 @@ protojson marshal
 HTTP Response
 ```
 
-Все decisions резолвятся при построении роута; в runtime hot path только closures и стандартные библиотечные вызовы.
+All decisions resolve at route construction time; the runtime hot path runs only closures and standard-library calls.
 
 ---
 
@@ -283,25 +283,25 @@ HTTP Response
 /composition/chi      // chi-specific adapter
 ```
 
-Размер кода для v0.1 — порядка 400–600 строк.
+Code size for v0.1 — on the order of 400–600 lines.
 
 ---
 
 ## Success Criteria (v0.1)
 
-1. **Simple proxy endpoint** — 4–6 строк, type-safe.
-2. **Endpoint с response mapping** — 8–10 строк.
-3. **Переименование proto-поля** → compile error в роуте, не runtime.
-4. **Tracing**: `otelhttp.NewMiddleware(...)` снаружи + `otelgrpc` на client → working distributed tracing без framework-specific config.
-5. **Покрытие**: CRUD на одном сервисе (GET by id, list with query, POST, PUT, DELETE).
-6. **Документация**: не больше 20 минут от первого endpoint до running proxy.
+1. **Simple proxy endpoint** — 4–6 lines, type-safe.
+2. **Endpoint with response mapping** — 8–10 lines.
+3. **Renaming a proto field** → compile error in the route, not at runtime.
+4. **Tracing**: `otelhttp.NewMiddleware(...)` on the outside + `otelgrpc` on the client → working distributed tracing with no framework-specific config.
+5. **Coverage**: CRUD on a single service (GET by id, list with query, POST, PUT, DELETE).
+6. **Documentation**: no more than 20 minutes from first endpoint to a running proxy.
 
 ---
 
 ## Open Questions
 
-1. **Verbosity setter'ов** — если на практике это окажется реальной болью, рассмотреть optional codegen из proto descriptor (не runtime reflection).
-2. ~~**Query / header type conversion sugar**~~ — решено в v0.2: shipped `PathInt32/64`, `PathBool`, `QueryInt32/64`, `QueryBool` плюс generic `PathAs`/`QueryAs`. UUID/time/float — отдельным мини-инкрементом.
-3. **Partial-response semantics в `Aggregate`** — per-call `.Optional()` или policy-based (`MinSuccessful(N)`)?
-4. **Multipart / file upload** — направление: `bind.Multipart` со stream в `bytes`-поле proto.
-5. **Field-level REST exposure** (защита от утечки новых internal-полей в публичный REST) — отдельный lint/test tool, не core. Нужно ли вообще?
+1. **Setter verbosity** — if this turns out to be a real pain point in practice, consider optional codegen from the proto descriptor (not runtime reflection).
+2. ~~**Query / header type conversion sugar**~~ — resolved in v0.2: shipped `PathInt32/64`, `PathBool`, `QueryInt32/64`, `QueryBool` plus generic `PathAs`/`QueryAs`. UUID / time / float — separate mini-increment.
+3. **Partial-response semantics in `Aggregate`** — per-call `.Optional()` or policy-based (`MinSuccessful(N)`)?
+4. **Multipart / file upload** — direction: `bind.Multipart` streaming into a `bytes` field of the proto.
+5. **Field-level REST exposure** (protection against accidentally leaking newly-added internal proto fields into a public REST API) — separate lint/test tool, not core. Is it needed at all?

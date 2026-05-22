@@ -22,9 +22,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/traum-tech/grpc-composition"
-	"github.com/traum-tech/grpc-composition/bind"
-	"github.com/traum-tech/grpc-composition/examples/basic/userpb"
+	"github.com/HiveTraum/grpc-composition"
+	"github.com/HiveTraum/grpc-composition/bind"
+	"github.com/HiveTraum/grpc-composition/examples/basic/userpb"
 )
 
 const bufSize = 1024 * 1024

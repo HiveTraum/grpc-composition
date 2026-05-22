@@ -1,4 +1,4 @@
-module github.com/traum-tech/grpc-composition
+module github.com/HiveTraum/grpc-composition
 
 go 1.25.0
 

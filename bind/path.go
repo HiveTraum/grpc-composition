@@ -7,7 +7,7 @@ package bind
 import (
 	"net/http"
 
-	"github.com/traum-tech/grpc-composition"
+	"github.com/HiveTraum/grpc-composition"
 )
 
 // Path binds a single URL path parameter into the request via the provided

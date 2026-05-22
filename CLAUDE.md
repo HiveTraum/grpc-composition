@@ -16,7 +16,8 @@
 
 ## Operating rules
 
-- Язык документации (README, long-form комментарии) — русский. Идентификаторы, экспортируемое API, godoc — английский.
+- README — английский (репо публичный, OSS-аудитория). CLAUDE.md и assistant-facing заметки — русский. Идентификаторы, экспортируемое API, godoc-комментарии — английский.
+- Module path: `github.com/HiveTraum/grpc-composition`. Не переименовывать без обновления всех `*.go`, `go.mod`, `.proto` (через `option go_package`) и перегенерации `*.pb.go`.
 - Базовый роутер — `net/http` 1.22+ (`r.PathValue`). Chi/прочие — через `composition.SetDefaultPathExtractor` (один setter в `main`).
 - Wire format для proto-сообщений — `protojson` (не `encoding/json`).
 - `bind/` зависит только от stdlib и корневого `composition` пакета. **Никакого** chi или других роутеров в импортах.

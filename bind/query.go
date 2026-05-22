@@ -3,7 +3,7 @@ package bind
 import (
 	"net/http"
 
-	"github.com/traum-tech/grpc-composition"
+	"github.com/HiveTraum/grpc-composition"
 )
 
 // Query binds a single URL query parameter into the request via the provided

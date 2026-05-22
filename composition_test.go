@@ -16,8 +16,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"github.com/traum-tech/grpc-composition"
-	"github.com/traum-tech/grpc-composition/bind"
+	"github.com/HiveTraum/grpc-composition"
+	"github.com/HiveTraum/grpc-composition/bind"
 )
 
 // ===== Mock gRPC client (stand-in for protoc-gen-go-grpc output). =====
