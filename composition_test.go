@@ -315,7 +315,61 @@ func TestProxy_OnSuccess(t *testing.T) {
 	}
 }
 
-// ===== Typed sugar helpers (PathInt32/64, PathBool, QueryInt32/64, QueryBool, PathAs, QueryAs) =====
+// ===== Typed sugar helpers (PathString/QueryString, PathInt32/64, PathBool, QueryInt32/64, QueryBool, PathAs, QueryAs) =====
+
+func TestPathString(t *testing.T) {
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/users/abc-42")
+	defer resp.Body.Close()
+	var body GetUserResponse
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Id != "abc-42" {
+		t.Fatalf("id: got %q want %q", body.Id, "abc-42")
+	}
+}
+
+func TestQueryString(t *testing.T) {
+	type NameReq struct{ Name string }
+	type NameResp struct{ Name string }
+	echo := func(_ context.Context, req *NameReq, _ ...grpc.CallOption) (*NameResp, error) {
+		return &NameResp{Name: req.Name}, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /search", composition.Proxy(echo,
+		bind.QueryString("q", func(req *NameReq, v string) { req.Name = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("present", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search?q=alice")
+		defer resp.Body.Close()
+		var body NameResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Name != "alice" {
+			t.Fatalf("name: got %q want %q", body.Name, "alice")
+		}
+	})
+
+	t.Run("absent → empty string", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search")
+		defer resp.Body.Close()
+		var body NameResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Name != "" {
+			t.Fatalf("name: got %q want empty", body.Name)
+		}
+	})
+}
+
 
 func TestQueryInt32(t *testing.T) {
 	client := &mockClient{}

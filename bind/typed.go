@@ -72,6 +72,21 @@ func parseInt64(s string) (int64, error) {
 
 // ===== Sugar for common proto scalar types =====
 
+// PathString binds a path parameter as a string field. Unlike [Path],
+// the setter does not return an error — assigning a string can never
+// fail, so the explicit `return nil` is omitted.
+//
+//	bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v })
+//
+// Use [Path] instead when you need to validate the string and surface
+// the validation error as HTTP 400.
+func PathString[Req any](name string, setter func(*Req, string)) composition.Binder[Req] {
+	return func(r *http.Request, req *Req) error {
+		setter(req, composition.PathParam(r, name))
+		return nil
+	}
+}
+
 // PathInt32 binds a required path parameter parsed as int32.
 //
 //	bind.PathInt32("page", func(req *pb.ListReq, v int32) { req.Page = v })
@@ -91,6 +106,20 @@ func PathInt64[Req any](name string, setter func(*Req, int64)) composition.Binde
 // "0", "f", "F", "FALSE", "false", "False" → false.
 func PathBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
 	return PathAs(name, strconv.ParseBool, setter)
+}
+
+// QueryString binds a query parameter as a string field. Missing values
+// pass an empty string to the setter (consistent with how protobuf
+// represents an absent string). The setter does not return an error.
+//
+//	bind.QueryString("name", func(req *pb.SearchReq, v string) { req.Name = v })
+//
+// Use [Query] instead when you need to validate the string.
+func QueryString[Req any](name string, setter func(*Req, string)) composition.Binder[Req] {
+	return func(r *http.Request, req *Req) error {
+		setter(req, r.URL.Query().Get(name))
+		return nil
+	}
 }
 
 // QueryInt32 binds an optional query parameter parsed as int32.

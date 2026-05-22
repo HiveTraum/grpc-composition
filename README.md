@@ -73,15 +73,12 @@ Existing approaches:
 ```go
 r.Get("/users/{id}",
     app.Proxy(userClient.GetUser,
-        bind.Path("id", func(req *pb.GetUserRequest, v string) error {
-            req.Id = v
-            return nil
-        }),
+        bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
     ),
 )
 ```
 
-The setter receives the raw string from the path / query and returns `error`. This gives an explicit place to parse into numeric, UUID, or time fields and to surface errors as HTTP 400.
+For string fields, `PathString` / `QueryString` are infallible: assigning a string can't fail, so the setter doesn't need to return `error`. Use the generic `bind.Path` / `bind.Query` (with `func(*Req, string) error`) when you need to validate the value or parse it into a non-string field — parse errors automatically surface as HTTP 400.
 
 ### Query params with typed parsing
 
@@ -106,7 +103,7 @@ Parse errors automatically bubble up as HTTP 400 with the parameter name as a pr
 
 **Semantic difference:** `Path*` treats the parameter as required (an empty value yields a 400); `Query*` is optional (an empty value leaves the field at zero, no error).
 
-Available helpers: `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`. UUID / time / float — through `*As` with a user-supplied parser for now.
+Available helpers: `PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`. UUID / time / float — through `*As` with a user-supplied parser for now.
 
 ### JSON body + path
 
@@ -114,10 +111,7 @@ Available helpers: `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`,
 r.Post("/orgs/{org_id}/members",
     app.Proxy(orgClient.AddMember,
         bind.JSON[pb.AddMemberRequest](),
-        bind.Path("org_id", func(req *pb.AddMemberRequest, v string) error {
-            req.OrgId = v
-            return nil
-        }),
+        bind.PathString("org_id", func(req *pb.AddMemberRequest, v string) { req.OrgId = v }),
     ),
 )
 ```
@@ -158,10 +152,7 @@ userConn, _ := grpc.NewClient(addr,
 userClient := pb.NewUserServiceClient(userConn)
 
 r.Get("/users/{id}", app.Proxy(userClient.GetUser,
-    bind.Path("id", func(req *pb.GetUserRequest, v string) error {
-        req.Id = v
-        return nil
-    }),
+    bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
 ))
 ```
 
@@ -215,7 +206,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
 | Functional Requirement | Status |
 |---|---|
-| Typed sugar binders (`PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`) | ✅ Done |
+| Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
 | `Location` builder for POST → 201 | ⏳ Planned |
 | Validation hook + `protovalidate` adapter | ⏳ Planned |

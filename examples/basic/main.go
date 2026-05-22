@@ -107,10 +107,7 @@ func main() {
 
 	// GET /users/{id} — single path param, proto-by-default response.
 	mux.Handle("GET /users/{id}", composition.Proxy(users.GetUser,
-		bind.Path("id", func(req *userpb.GetUserRequest, v string) error {
-			req.Id = v
-			return nil
-		}),
+		bind.PathString("id", func(req *userpb.GetUserRequest, v string) { req.Id = v }),
 	))
 
 	// GET /users?limit=10&offset=0 — two int32 query params via typed sugar.
@@ -127,10 +124,7 @@ func main() {
 
 	// GET /users-dto/{id} — same upstream call, different REST shape via Map.
 	mux.Handle("GET /users-dto/{id}", composition.Proxy(users.GetUser,
-		bind.Path("id", func(req *userpb.GetUserRequest, v string) error {
-			req.Id = v
-			return nil
-		}),
+		bind.PathString("id", func(req *userpb.GetUserRequest, v string) { req.Id = v }),
 	).Map(func(u *userpb.User) any {
 		return map[string]string{
 			"id":           u.Id,
