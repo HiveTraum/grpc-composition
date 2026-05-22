@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/HiveTraum/grpc-composition"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // PathAs binds a path parameter parsed via the supplied function.
@@ -138,4 +139,69 @@ func QueryInt64[Req any](name string, setter func(*Req, int64)) composition.Bind
 // QueryBool binds an optional query parameter parsed as bool.
 func QueryBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
 	return QueryAs(name, strconv.ParseBool, setter)
+}
+
+// ===== Enum binders =====
+
+// protoEnum constrains T to a protoc-generated enum: an int32-based type
+// that satisfies [protoreflect.Enum]. All standard generated enums qualify.
+type protoEnum interface {
+	~int32
+	protoreflect.Enum
+}
+
+// PathEnum binds a path parameter to a protobuf enum field.
+//
+// The parameter is matched against the enum's canonical proto names
+// (case-sensitive, e.g. "STATUS_ACTIVE") or its underlying numeric
+// value (e.g. "1"). Unknown values yield HTTP 400.
+//
+//	bind.PathEnum("status", func(req *pb.Req, v pb.Status) { req.Status = v })
+//
+// Case-insensitive or alias-based matching is intentionally not built in:
+// use [PathAs] with a custom parser if you need looser semantics.
+func PathEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composition.Binder[Req] {
+	return func(r *http.Request, req *Req) error {
+		var zero T
+		n, err := lookupEnum(zero.Descriptor(), composition.PathParam(r, name))
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		setter(req, T(n))
+		return nil
+	}
+}
+
+// QueryEnum binds an optional query parameter to a protobuf enum field.
+// A missing or empty parameter leaves the field at its zero value
+// (typically the *_UNSPECIFIED variant). Otherwise the same matching
+// rules as [PathEnum] apply.
+//
+//	bind.QueryEnum("role", func(req *pb.Req, v pb.Role) { req.Role = v })
+func QueryEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composition.Binder[Req] {
+	return func(r *http.Request, req *Req) error {
+		raw := r.URL.Query().Get(name)
+		if raw == "" {
+			return nil
+		}
+		var zero T
+		n, err := lookupEnum(zero.Descriptor(), raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		setter(req, T(n))
+		return nil
+	}
+}
+
+func lookupEnum(desc protoreflect.EnumDescriptor, raw string) (protoreflect.EnumNumber, error) {
+	if v := desc.Values().ByName(protoreflect.Name(raw)); v != nil {
+		return v.Number(), nil
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		if v := desc.Values().ByNumber(protoreflect.EnumNumber(n)); v != nil {
+			return v.Number(), nil
+		}
+	}
+	return 0, fmt.Errorf("%q is not a valid enum value", raw)
 }

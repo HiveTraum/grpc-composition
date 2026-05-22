@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/HiveTraum/grpc-composition"
@@ -436,6 +437,120 @@ func TestPathInt64_Bool(t *testing.T) {
 
 	t.Run("bad bool → 400", func(t *testing.T) {
 		resp, _ := http.Get(srv.URL + "/search/1/maybe")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+	})
+}
+
+// ===== Enum binders =====
+
+// LabelReq / LabelResp use descriptorpb.FieldDescriptorProto_Label as a real
+// generated protobuf enum (values: LABEL_OPTIONAL=1, LABEL_REQUIRED=2,
+// LABEL_REPEATED=3) so we can exercise PathEnum / QueryEnum without
+// shipping our own test-only .proto.
+type LabelReq struct {
+	L descriptorpb.FieldDescriptorProto_Label
+}
+type LabelResp struct {
+	L descriptorpb.FieldDescriptorProto_Label
+}
+
+type labelClient struct{}
+
+func (c *labelClient) Echo(_ context.Context, req *LabelReq, _ ...grpc.CallOption) (*LabelResp, error) {
+	return &LabelResp{L: req.L}, nil
+}
+
+func TestPathEnum(t *testing.T) {
+	client := &labelClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /labels/{l}", composition.Proxy(client.Echo,
+		bind.PathEnum("l", func(req *LabelReq, v descriptorpb.FieldDescriptorProto_Label) { req.L = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("by name", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels/LABEL_REQUIRED")
+		defer resp.Body.Close()
+		var body LabelResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.L != descriptorpb.FieldDescriptorProto_LABEL_REQUIRED {
+			t.Fatalf("got %v want LABEL_REQUIRED", body.L)
+		}
+	})
+
+	t.Run("by number", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels/3") // LABEL_REPEATED
+		defer resp.Body.Close()
+		var body LabelResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.L != descriptorpb.FieldDescriptorProto_LABEL_REPEATED {
+			t.Fatalf("got %v want LABEL_REPEATED", body.L)
+		}
+	})
+
+	t.Run("unknown name → 400", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels/NOPE")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("unknown number → 400", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels/99")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("case-sensitive: lowercase rejected", func(t *testing.T) {
+		// Verifies strict matching: "label_required" is not a valid proto name.
+		resp, _ := http.Get(srv.URL + "/labels/label_required")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400 (case-sensitive matching)", resp.StatusCode)
+		}
+	})
+}
+
+func TestQueryEnum(t *testing.T) {
+	client := &labelClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /labels", composition.Proxy(client.Echo,
+		bind.QueryEnum("l", func(req *LabelReq, v descriptorpb.FieldDescriptorProto_Label) { req.L = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("present by name", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels?l=LABEL_OPTIONAL")
+		defer resp.Body.Close()
+		var body LabelResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.L != descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL {
+			t.Fatalf("got %v want LABEL_OPTIONAL", body.L)
+		}
+	})
+
+	t.Run("absent → zero value", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels")
+		defer resp.Body.Close()
+		var body LabelResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		// Zero of the type — there is no enum value with number 0 in this
+		// enum, but the int32 zero value is what we expect with empty query.
+		if int32(body.L) != 0 {
+			t.Fatalf("got %v want zero", body.L)
+		}
+	})
+
+	t.Run("bad value → 400", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/labels?l=NOPE")
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status: got %d want 400", resp.StatusCode)

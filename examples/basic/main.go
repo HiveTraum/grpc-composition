@@ -38,8 +38,9 @@ type userServer struct {
 func newUserServer() *userServer {
 	return &userServer{
 		users: []*userpb.User{
-			{Id: "1", Name: "Alice", Email: "alice@example.com"},
-			{Id: "2", Name: "Bob", Email: "bob@example.com"},
+			{Id: "1", Name: "Alice", Email: "alice@example.com", Role: userpb.Role_ROLE_ADMIN},
+			{Id: "2", Name: "Bob", Email: "bob@example.com", Role: userpb.Role_ROLE_USER},
+			{Id: "3", Name: "Carol", Email: "carol@example.com", Role: userpb.Role_ROLE_USER},
 		},
 	}
 }
@@ -55,13 +56,22 @@ func (s *userServer) GetUser(_ context.Context, req *userpb.GetUserRequest) (*us
 
 func (s *userServer) ListUsers(_ context.Context, req *userpb.ListUsersRequest) (*userpb.ListUsersResponse, error) {
 	users := s.users
+	if req.Role != userpb.Role_ROLE_UNSPECIFIED {
+		filtered := users[:0:0]
+		for _, u := range users {
+			if u.Role == req.Role {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
 	if off := int(req.Offset); off > 0 && off < len(users) {
 		users = users[off:]
 	}
 	if lim := int(req.Limit); lim > 0 && lim < len(users) {
 		users = users[:lim]
 	}
-	return &userpb.ListUsersResponse{Users: users, Total: int32(len(s.users))}, nil
+	return &userpb.ListUsersResponse{Users: users, Total: int32(len(users))}, nil
 }
 
 func (s *userServer) CreateUser(_ context.Context, req *userpb.CreateUserRequest) (*userpb.User, error) {
@@ -110,11 +120,12 @@ func main() {
 		bind.PathString("id", func(req *userpb.GetUserRequest, v string) { req.Id = v }),
 	))
 
-	// GET /users?limit=10&offset=0 — two int32 query params via typed sugar.
-	// Empty → leave at zero; bad input → HTTP 400 with "limit:" prefix.
+	// GET /users?limit=10&offset=0&role=ROLE_USER — int32 + enum query params.
+	// Empty values are tolerated; bad parse → HTTP 400 with "<param>:" prefix.
 	mux.Handle("GET /users", composition.Proxy(users.ListUsers,
 		bind.QueryInt32("limit", func(req *userpb.ListUsersRequest, v int32) { req.Limit = v }),
 		bind.QueryInt32("offset", func(req *userpb.ListUsersRequest, v int32) { req.Offset = v }),
+		bind.QueryEnum("role", func(req *userpb.ListUsersRequest, v userpb.Role) { req.Role = v }),
 	))
 
 	// POST /users — JSON body, returns 201 Created on success.

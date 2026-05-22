@@ -103,7 +103,21 @@ Parse errors automatically bubble up as HTTP 400 with the parameter name as a pr
 
 **Semantic difference:** `Path*` treats the parameter as required (an empty value yields a 400); `Query*` is optional (an empty value leaves the field at zero, no error).
 
-Available helpers: `PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`. UUID / time / float — through `*As` with a user-supplied parser for now.
+Available helpers: `PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`. UUID / time / float — through `*As` with a user-supplied parser for now.
+
+### Protobuf enums
+
+```go
+r.Get("/users",
+    app.Proxy(userClient.ListUsers,
+        bind.QueryEnum("role", func(req *pb.ListUsersRequest, v pb.Role) { req.Role = v }),
+    ),
+)
+```
+
+`PathEnum` / `QueryEnum` accept the canonical proto name (`ROLE_ADMIN`) or its numeric value (`2`). Matching is **strict and case-sensitive** to keep typo detection sharp and behavior aligned with `protojson`; `?role=admin` returns 400. For looser semantics, build a custom parser with `PathAs` / `QueryAs`.
+
+For enum fields in a JSON request body, no extra helper is needed — `protojson.Unmarshal` (used by `bind.JSON`) already accepts both names and numbers.
 
 ### JSON body + path
 
@@ -206,7 +220,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
 | Functional Requirement | Status |
 |---|---|
-| Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`) | ✅ Done |
+| Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
 | `Location` builder for POST → 201 | ⏳ Planned |
 | Validation hook + `protovalidate` adapter | ⏳ Planned |
