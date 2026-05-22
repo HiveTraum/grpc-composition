@@ -323,7 +323,6 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) + `application/problem+json` | ✅ Done |
 | `WithErrorMapper` per-route + `SetDefaultErrorMapper` package-level | ✅ Done |
 | Additional typed sugar for `Float64` (Path/Query/Header) | ✅ Done |
-| Additional typed sugar for `UUID`, `time.Time` | ⏳ Planned |
 
 > **Validation:** use [`protovalidate-go`](https://github.com/bufbuild/protovalidate-go) as a gRPC unary client interceptor. Violations arrive as `codes.InvalidArgument` with `status.WithDetails(*errdetails.BadRequest)` and surface as HTTP 400 field errors via RFC 7807 error details (see above). No framework-level hook is needed.
 
@@ -345,6 +344,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | Multipart / file upload (`bind.Multipart`) | ⏳ Planned |
 | `Binder` metadata refactor (struct with `PathParam` / `QueryParam` fields) + `Mount` helper that validates declared path params against the route pattern at startup, catching binder/pattern mismatches at boot rather than first request | ⏳ Planned |
 | `HeaderEnum` typed binder (deferred from v0.2 along with other header infrastructure) | ⏳ Planned |
+| Typed sugar for `UUID`, `time.Time` (need external dep + format-choice decisions) | ⏳ Planned |
 
 ### Out of scope (explicit non-goals)
 
