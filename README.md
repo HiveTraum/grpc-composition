@@ -343,6 +343,8 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | gin / echo adapters | ⏳ Planned |
 | Optional codegen for setters (if ergonomics turn out to be a real pain point) | ⏳ Planned |
 | Multipart / file upload (`bind.Multipart`) | ⏳ Planned |
+| `Binder` metadata refactor (struct with `PathParam` / `QueryParam` fields) + `Mount` helper that validates declared path params against the route pattern at startup, catching binder/pattern mismatches at boot rather than first request | ⏳ Planned |
+| `HeaderEnum` typed binder (deferred from v0.2 along with other header infrastructure) | ⏳ Planned |
 
 ### Out of scope (explicit non-goals)
 
