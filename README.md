@@ -222,12 +222,12 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 |---|---|
 | Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
-| `Location` builder for POST → 201 | ⏳ Planned |
-| Validation hook + `protovalidate` adapter | ⏳ Planned |
 | Metadata forwarding (HTTP header → gRPC metadata, allowlist) | ⏳ Planned |
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) | ⏳ Planned |
 | `WithErrorMapper` per-route override | ⏳ Planned |
 | Additional typed sugar for `Float64`, `UUID`, `time.Time` | ⏳ Planned |
+
+> **Validation:** use [`protovalidate-go`](https://github.com/bufbuild/protovalidate-go) as a gRPC unary client interceptor. Violations arrive as `codes.InvalidArgument` with `status.WithDetails(*errdetails.BadRequest)` and surface as HTTP 400 field errors via RFC 7807 error details (see above). No framework-level hook is needed.
 
 ### v0.3 — Aggregation
 
@@ -310,6 +310,7 @@ Code size for v0.1 — on the order of 400–600 lines.
 3. **Partial-response semantics in `Aggregate`** — per-call `.Optional()` or policy-based (`MinSuccessful(N)`)?
 4. **Multipart / file upload** — direction: `bind.Multipart` streaming into a `bytes` field of the proto.
 5. **Field-level REST exposure** (protection against accidentally leaking newly-added internal proto fields into a public REST API) — separate lint/test tool, not core. Is it needed at all?
+6. **Response-driven response headers** — `Location` for `POST → 201`, `ETag` for conditional requests, `X-Total-Count` for pagination, etc. A generic helper that derives outgoing HTTP headers from the gRPC response (`func(*Resp) http.Header`) would cover all of these in one shot. Worth a dedicated builder, or leave it to `Map` + a custom outer handler?
 
 ---
 
