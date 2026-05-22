@@ -39,6 +39,18 @@ type ListUsersResponse struct {
 	Count int32
 }
 
+type SearchRequest struct {
+	Page      int32
+	Big       int64
+	Published bool
+}
+
+type SearchResponse struct {
+	Page      int32
+	Big       int64
+	Published bool
+}
+
 type mockClient struct {
 	getUserErr error
 }
@@ -52,6 +64,10 @@ func (c *mockClient) GetUser(_ context.Context, req *GetUserRequest, _ ...grpc.C
 
 func (c *mockClient) ListUsers(_ context.Context, req *ListUsersRequest, _ ...grpc.CallOption) (*ListUsersResponse, error) {
 	return &ListUsersResponse{Count: req.Limit}, nil
+}
+
+func (c *mockClient) Search(_ context.Context, req *SearchRequest, _ ...grpc.CallOption) (*SearchResponse, error) {
+	return &SearchResponse{Page: req.Page, Big: req.Big, Published: req.Published}, nil
 }
 
 // ===== Tests =====
@@ -296,6 +312,102 @@ func TestProxy_OnSuccess(t *testing.T) {
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status: got %d want 201", resp.StatusCode)
+	}
+}
+
+// ===== Typed sugar helpers (PathInt32/64, PathBool, QueryInt32/64, QueryBool, PathAs, QueryAs) =====
+
+func TestQueryInt32(t *testing.T) {
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /search", composition.Proxy(client.Search,
+		bind.QueryInt32("page", func(req *SearchRequest, v int32) { req.Page = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("ok", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search?page=7")
+		defer resp.Body.Close()
+		var body SearchResponse
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Page != 7 {
+			t.Fatalf("page: got %d want 7", body.Page)
+		}
+	})
+
+	t.Run("empty leaves zero", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search")
+		defer resp.Body.Close()
+		var body SearchResponse
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Page != 0 {
+			t.Fatalf("page: got %d want 0 (default)", body.Page)
+		}
+	})
+
+	t.Run("bad input → 400 with prefix", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search?page=oops")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+		var body map[string]string
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if !strings.Contains(body["error"], "page") {
+			t.Fatalf("error: %q does not contain %q", body["error"], "page")
+		}
+	})
+}
+
+func TestPathInt64_Bool(t *testing.T) {
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /search/{big}/{pub}", composition.Proxy(client.Search,
+		bind.PathInt64("big", func(req *SearchRequest, v int64) { req.Big = v }),
+		bind.PathBool("pub", func(req *SearchRequest, v bool) { req.Published = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("ok", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search/9999999999/true")
+		defer resp.Body.Close()
+		var body SearchResponse
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Big != 9999999999 || body.Published != true {
+			t.Fatalf("body: %+v", body)
+		}
+	})
+
+	t.Run("bad bool → 400", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/search/1/maybe")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+	})
+}
+
+func TestPathAs_CustomParser(t *testing.T) {
+	client := &mockClient{}
+	parseHex := func(s string) (int32, error) {
+		n, err := strconv.ParseInt(s, 16, 32)
+		return int32(n), err
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /hex/{v}", composition.Proxy(client.Search,
+		bind.PathAs("v", parseHex, func(req *SearchRequest, v int32) { req.Page = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/hex/ff")
+	defer resp.Body.Close()
+	var body SearchResponse
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Page != 255 {
+		t.Fatalf("page: got %d want 255", body.Page)
 	}
 }
 

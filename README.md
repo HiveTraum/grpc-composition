@@ -83,27 +83,30 @@ r.Get("/users/{id}",
 
 Setter принимает raw-строку из path/query и возвращает `error` — это даёт явное место для парсинга в числовые/UUID/time поля и корректного surface'а ошибок как HTTP 400.
 
-### Query params с парсингом
+### Query params с типизированным парсингом
 
 ```go
 r.Get("/users",
     app.Proxy(userClient.ListUsers,
-        bind.Query("limit", func(req *pb.ListUsersRequest, v string) error {
-            if v == "" {
-                return nil // optional
-            }
-            n, err := strconv.Atoi(v)
-            if err != nil {
-                return fmt.Errorf("limit: %w", err)
-            }
-            req.Limit = int32(n)
-            return nil
-        }),
+        bind.QueryInt32("limit",  func(req *pb.ListUsersRequest, v int32) { req.Limit = v }),
+        bind.QueryInt32("offset", func(req *pb.ListUsersRequest, v int32) { req.Offset = v }),
     ),
 )
 ```
 
-Типизированные сахарные хелперы (`bind.QueryInt32`, `bind.PathUUID`, ...) отложены в v0.2; до тех пор пользователь может завернуть парсер в свой generic helper (см. `examples/basic/main.go`, функция `parseInt32`).
+Для типов вне готового набора — generic `bind.PathAs` / `bind.QueryAs` с произвольным парсером:
+
+```go
+bind.PathAs("user_id", uuid.Parse, func(req *pb.Req, v uuid.UUID) {
+    req.UserId = v.String()
+})
+```
+
+Парс-ошибки автоматически бабблят как HTTP 400 с префиксом имени параметра, например: `{"error":"bind: limit: strconv.ParseInt: parsing \"oops\": invalid syntax"}`.
+
+**Семантическое отличие:** `Path*` ожидает обязательный параметр (пустое значение → 400), `Query*` опционален (пустое → поле остаётся zero, ошибки нет).
+
+Готовые хелперы: `PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`. UUID/time/float — пока через `*As` с пользовательским парсером.
 
 ### JSON body + path
 
@@ -212,12 +215,14 @@ Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) → отложе
 
 | Functional Requirement | Status |
 |---|---|
+| Typed sugar binders (`PathInt32`, `PathInt64`, `PathBool`, `PathAs`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryAs`) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
 | `Location` builder для POST → 201 | ⏳ Planned |
 | Validation hook + `protovalidate` adapter | ⏳ Planned |
 | Metadata forwarding (HTTP header → grpc metadata, allowlist) | ⏳ Planned |
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) | ⏳ Planned |
 | `WithErrorMapper` для per-route override | ⏳ Planned |
+| Дополнительные typed-sugar для `Float64`, `UUID`, `time.Time` | ⏳ Planned |
 
 ### v0.3 — Aggregation
 
@@ -296,7 +301,7 @@ HTTP Response
 ## Open Questions
 
 1. **Verbosity setter'ов** — если на практике это окажется реальной болью, рассмотреть optional codegen из proto descriptor (не runtime reflection).
-2. **Query / header type conversion sugar** — `bind.QueryInt`, `bind.QueryTime`, или ручные setter'ы по месту? Решается по частоте use case.
+2. ~~**Query / header type conversion sugar**~~ — решено в v0.2: shipped `PathInt32/64`, `PathBool`, `QueryInt32/64`, `QueryBool` плюс generic `PathAs`/`QueryAs`. UUID/time/float — отдельным мини-инкрементом.
 3. **Partial-response semantics в `Aggregate`** — per-call `.Optional()` или policy-based (`MinSuccessful(N)`)?
 4. **Multipart / file upload** — направление: `bind.Multipart` со stream в `bytes`-поле proto.
 5. **Field-level REST exposure** (защита от утечки новых internal-полей в публичный REST) — отдельный lint/test tool, не core. Нужно ли вообще?

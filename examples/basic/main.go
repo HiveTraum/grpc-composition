@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -114,15 +113,11 @@ func main() {
 		}),
 	))
 
-	// GET /users?limit=10&offset=0 — two query params with parsing.
-	// Parse errors surface as HTTP 400 via the binder's error return.
+	// GET /users?limit=10&offset=0 — two int32 query params via typed sugar.
+	// Empty → leave at zero; bad input → HTTP 400 with "limit:" prefix.
 	mux.Handle("GET /users", composition.Proxy(users.ListUsers,
-		bind.Query("limit", parseInt32("limit", func(req *userpb.ListUsersRequest, v int32) {
-			req.Limit = v
-		})),
-		bind.Query("offset", parseInt32("offset", func(req *userpb.ListUsersRequest, v int32) {
-			req.Offset = v
-		})),
+		bind.QueryInt32("limit", func(req *userpb.ListUsersRequest, v int32) { req.Limit = v }),
+		bind.QueryInt32("offset", func(req *userpb.ListUsersRequest, v int32) { req.Offset = v }),
 	))
 
 	// POST /users — JSON body, returns 201 Created on success.
@@ -147,27 +142,5 @@ func main() {
 	log.Println("listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
-	}
-}
-
-// parseInt32 wraps a typed int32 setter into the string-setter signature
-// expected by bind.Query / bind.Path, parsing the raw value and returning
-// a descriptive error on failure. Empty input is treated as "not provided".
-//
-// Demonstrates how callers can build their own typed binder helpers; the
-// library itself ships only the string-form to keep core dependencies
-// minimal. Typed sugar (bind.QueryInt32, bind.PathUUID, ...) is on the
-// v0.2 roadmap.
-func parseInt32[Req any](paramName string, setter func(*Req, int32)) func(*Req, string) error {
-	return func(req *Req, v string) error {
-		if v == "" {
-			return nil
-		}
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("%s: %w", paramName, err)
-		}
-		setter(req, int32(n))
-		return nil
 	}
 }
