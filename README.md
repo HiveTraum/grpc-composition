@@ -330,6 +330,134 @@ A custom mapper can return any body shape; only `composition.ProblemDetails` tri
 
 ---
 
+## Aggregation patterns
+
+`Aggregate` plus stdlib `golang.org/x/sync/errgroup` covers the vast majority of "call N gRPC services and assemble a response" scenarios. This section is the recommended cookbook.
+
+### Two parallel calls
+
+```go
+mux.Handle("GET /feed/{user_id}", composition.Aggregate(
+    func(ctx context.Context, r *http.Request) (any, error) {
+        uid := r.PathValue("user_id")
+
+        g, gctx := errgroup.WithContext(ctx)
+        var user *pb.User
+        var posts *pb.ListPostsResponse
+
+        g.Go(func() error {
+            u, err := userClient.GetUser(gctx, &pb.GetUserRequest{Id: uid})
+            if err != nil { return err }
+            user = u
+            return nil
+        })
+        g.Go(func() error {
+            p, err := postClient.ListPosts(gctx, &pb.ListPostsRequest{UserId: uid})
+            if err != nil { return err }
+            posts = p
+            return nil
+        })
+
+        if err := g.Wait(); err != nil {
+            return nil, err
+        }
+
+        return FeedResponse{User: user, Posts: posts.Posts}, nil
+    },
+))
+```
+
+**Use `gctx` inside the goroutines, not `ctx`.** `errgroup.WithContext(ctx)` returns a child context that is cancelled the moment any goroutine returns a non-nil error. Passing `gctx` into the gRPC call lets the sibling call see `context.Canceled` immediately when one of them fails — no wasted network work. If you accidentally use `ctx`, sibling calls run to completion even after the first failure.
+
+### Optional (partial-failure) calls
+
+When a call is not critical to the response — e.g. user preferences with sane defaults — swallow its error inside the goroutine and leave the destination at `nil`:
+
+```go
+var user *pb.User
+var prefs *pb.UserPrefs // optional — may be nil after Wait()
+
+g.Go(func() error {
+    u, err := userClient.GetUser(gctx, &pb.GetUserRequest{Id: uid})
+    if err != nil { return err }
+    user = u
+    return nil
+})
+
+g.Go(func() error {
+    p, err := prefClient.GetPrefs(gctx, &pb.GetPrefsRequest{UserId: uid})
+    if err != nil {
+        log.Printf("prefs unavailable: %v", err) // optional: still log it
+        return nil                                 // partial failure is OK here
+    }
+    prefs = p
+    return nil
+})
+
+if err := g.Wait(); err != nil {
+    return nil, err
+}
+
+if prefs == nil {
+    prefs = defaultPrefs()
+}
+```
+
+Returning `nil` from a `g.Go` closure **is** the "optional" semantic — no framework helper would make this clearer.
+
+### Many calls + DTO assembly
+
+Same pattern, just more goroutines. The final shape is assembled after `g.Wait()`:
+
+```go
+var user *pb.User
+var posts *pb.ListPostsResponse
+var prefs *pb.UserPrefs
+
+g.Go(/* user */)
+g.Go(/* posts */)
+g.Go(/* prefs */)
+
+if err := g.Wait(); err != nil {
+    return nil, err
+}
+
+return FeedResponse{
+    User:  toUserDTO(user),
+    Posts: toPostsDTO(posts.Posts),
+    Prefs: toPrefsDTO(prefs),
+}, nil
+```
+
+If you need to return a `proto.Message` (instead of a custom DTO), do so — `Aggregate` detects it and serializes via `protojson` automatically.
+
+### Common pitfalls
+
+| Mistake | Symptom | Fix |
+|---|---|---|
+| Using `ctx` instead of `gctx` inside goroutines | Sibling gRPC calls don't cancel on first failure | Pass `gctx` everywhere inside `g.Go` |
+| Sharing a map / slice without lock across goroutines | Race detected by `go test -race`; intermittent panics | One variable per call (as shown above), or guard with `sync.Mutex` |
+| Forgetting to check `g.Wait()` error | Aggregation may "succeed" with partial data | Always `if err := g.Wait(); err != nil { return nil, err }` first |
+| Setting destination *and* returning the error | Caller sees stale data when sibling failed first | Check err first, set destination only on success |
+| Using a `chan T` instead of variables | Easy to deadlock / leak goroutines | Variables + indices are simpler for N ≤ ~10 calls |
+
+### Why no framework helpers for this?
+
+A `composition.Parallel` / `Call` / `.Optional()` helper would save ~3 lines per call. The trade-off is too lopsided:
+
+- **One more API to learn**, on top of `golang.org/x/sync/errgroup` which every Go developer already knows.
+- **Cancellation propagation** still has to be modeled — wrapping `errgroup` only obscures where it comes from.
+- **Heterogeneous return types** force either pointer-to-pointer (`Call(&dst, ...)`) or losing type safety with `any`. Closures-over-typed-variables stay clean.
+
+For codebases that prefer different concurrency primitives, both work as-is inside `Aggregate`:
+
+- [`sourcegraph/conc`](https://github.com/sourcegraph/conc) — structured concurrency with panic safety; nearly identical API to `errgroup` but cleaner cancellation defaults.
+- [`samber/ro`](https://github.com/samber/ro) — ReactiveX-style streams; `Future + CombineLatestN + ro.Collect`. Pays off for actual stream processing (continuous events, filters, throttling) — for one-shot parallel calls the lazy-Observable ceremony tends to outweigh the declarative win.
+
+The framework is neutral. Pick the one that already fits your stack.
+
+---
+
 ## Implementation Status
 
 Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
@@ -372,8 +500,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 
 Notes:
 
-- **Parallelism is deliberately not framework concern.** `errgroup` (stdlib), [`sourcegraph/conc`](https://github.com/sourcegraph/conc), and [`samber/ro`](https://github.com/samber/ro) (ReactiveX `Future` + `CombineLatestN`) all cover that space well — they live one import away and the framework would only add boilerplate-shifted-elsewhere.
-- **Cookbook for aggregation patterns** will be added to the README when there is a real user request — the `Aggregate` example above is the load-bearing one for now.
+- **Parallelism is deliberately not framework concern.** `errgroup` (stdlib), [`sourcegraph/conc`](https://github.com/sourcegraph/conc), and [`samber/ro`](https://github.com/samber/ro) (ReactiveX `Future` + `CombineLatestN`) all cover that space well — they live one import away and the framework would only add boilerplate-shifted-elsewhere. See the [Aggregation patterns](#aggregation-patterns) cookbook for the recommended `errgroup` recipe.
 
 ### v0.4+ — Sugar & tooling
 
