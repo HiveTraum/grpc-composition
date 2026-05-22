@@ -47,6 +47,85 @@ Existing approaches:
 
 ---
 
+## Quick example
+
+A flights BFF that fronts a single `Statistics` gRPC service — four straight proxies (path params, multi-param routes, enums) plus one aggregation that fans out two parallel gRPC calls into a single response:
+
+```go
+conn, err := grpc.NewClient("localhost:8002",
+    grpc.WithTransportCredentials(insecure.NewCredentials()),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer conn.Close()
+
+statsClient := v1.NewStatisticsClient(conn)
+
+mux := http.NewServeMux()
+
+// Simple proxy: single path param → request field.
+mux.Handle("GET /flights/cheap/{start_city_code}", composition.Proxy(statsClient.GetCheap,
+    bind.PathString("start_city_code", func(req *v1.GetCheapRequest, v string) { req.StartCityCode = v }),
+))
+
+mux.Handle("GET /flights/popular/{start_city_code}", composition.Proxy(statsClient.GetPopular,
+    bind.PathString("start_city_code", func(req *v1.GetPopularRequest, v string) { req.StartCityCode = v }),
+))
+
+mux.Handle("GET /flights/cheap_by_airline/{airline_code}", composition.Proxy(statsClient.GetCheapByAirline,
+    bind.PathString("airline_code", func(req *v1.GetCheapByAirlineRequest, v string) { req.AirlineCode = v }),
+))
+
+// Multiple path params + an enum — one binder per field, in any order.
+mux.Handle("GET /flights/calendar/{start_city_code}/{end_city_code}/{from_date}/{to_date}/{service_class}",
+    composition.Proxy(statsClient.GetCalendar,
+        bind.PathString("start_city_code", func(req *v1.GetCalendarRequest, v string) { req.StartCityCode = v }),
+        bind.PathString("end_city_code",   func(req *v1.GetCalendarRequest, v string) { req.EndCityCode = v }),
+        bind.PathString("from_date",       func(req *v1.GetCalendarRequest, v string) { req.FromDate = v }),
+        bind.PathString("to_date",         func(req *v1.GetCalendarRequest, v string) { req.ToDate = v }),
+        bind.PathEnum  ("service_class",   func(req *v1.GetCalendarRequest, v v1.ServiceClass) { req.ServiceClass = v }),
+    ),
+)
+
+// Aggregation: two parallel gRPC calls assembled into one HTTP response.
+mux.Handle("GET /flights/cheap_and_popular/{start_city_code}", composition.Aggregate(
+    func(ctx context.Context, r *http.Request) (any, error) {
+        startCityCode := r.PathValue("start_city_code")
+
+        g, gctx := errgroup.WithContext(ctx)
+        var cheap *v1.GetCheapResponse
+        var popular *v1.GetPopularResponse
+
+        g.Go(func() error {
+            resp, err := statsClient.GetCheap(gctx, &v1.GetCheapRequest{StartCityCode: startCityCode})
+            if err != nil { return err }
+            cheap = resp
+            return nil
+        })
+        g.Go(func() error {
+            resp, err := statsClient.GetPopular(gctx, &v1.GetPopularRequest{StartCityCode: startCityCode})
+            if err != nil { return err }
+            popular = resp
+            return nil
+        })
+
+        if err := g.Wait(); err != nil {
+            return nil, err
+        }
+
+        return CheapAndPopular{Cheap: cheap, Popular: popular}, nil
+    },
+))
+
+log.Println("listening on :8080")
+log.Fatal(http.ListenAndServe(":8080", mux))
+```
+
+Every gRPC error from `statsClient.*` flows through `DefaultErrorMapper` — `NotFound` → 404, `InvalidArgument` → 400, etc.; 5xx bodies are redacted (see [Error mapping](#error-mapping)). For the cookbook on parallel / optional calls inside `Aggregate`, see [Aggregation patterns](#aggregation-patterns).
+
+---
+
 ## Base assumptions
 
 1. **gRPC contract compatibility is an external concern.** Use `buf breaking` / `protolock` / equivalent. The framework does not police proto compatibility.
