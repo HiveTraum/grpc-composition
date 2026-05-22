@@ -87,19 +87,21 @@ func (s *userServer) CreateUser(_ context.Context, req *userpb.CreateUserRequest
 	return u, nil
 }
 
-func main() {
-	// 1. In-process gRPC server.
+// newInProcessClient starts an in-process gRPC server backed by the
+// in-memory userServer and returns a client connected to it via bufconn.
+// Factored out of newApp so tests can build alternative HTTP wirings
+// (e.g. a route with an intentionally wrong binder name) over the same
+// gRPC backend.
+func newInProcessClient() (userpb.UserServiceClient, func()) {
 	lis := bufconn.Listen(bufSize)
-	srv := grpc.NewServer()
-	userpb.RegisterUserServiceServer(srv, newUserServer())
+	grpcSrv := grpc.NewServer()
+	userpb.RegisterUserServiceServer(grpcSrv, newUserServer())
 	go func() {
-		if err := srv.Serve(lis); err != nil {
-			log.Fatalf("grpc serve: %v", err)
+		if err := grpcSrv.Serve(lis); err != nil {
+			log.Printf("grpc serve: %v", err)
 		}
 	}()
-	defer srv.Stop()
 
-	// 2. Dial the in-process server.
 	conn, err := grpc.NewClient("passthrough://bufnet",
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
@@ -109,10 +111,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("grpc dial: %v", err)
 	}
-	defer conn.Close()
-	users := userpb.NewUserServiceClient(conn)
+	return userpb.NewUserServiceClient(conn), func() {
+		_ = conn.Close()
+		grpcSrv.Stop()
+	}
+}
 
-	// 3. Wire HTTP routes via grpc-composition.
+// newApp wires the example end-to-end: starts an in-process gRPC server
+// over bufconn, dials it, and registers HTTP routes via grpc-composition.
+// Returns the HTTP handler and a cleanup function. Exposed (instead of
+// inlined into main) so the tests in main_test.go can drive the full
+// stack via httptest without duplicating the wiring.
+func newApp() (http.Handler, func()) {
+	users, cleanup := newInProcessClient()
+
 	mux := http.NewServeMux()
 
 	// GET /users/{id} — single path param, proto-by-default response.
@@ -144,8 +156,15 @@ func main() {
 		}
 	}))
 
+	return mux, cleanup
+}
+
+func main() {
+	handler, cleanup := newApp()
+	defer cleanup()
+
 	log.Println("listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := http.ListenAndServe(":8080", handler); err != nil {
 		log.Fatal(err)
 	}
 }
