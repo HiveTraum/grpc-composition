@@ -225,14 +225,106 @@ func TestProxy_ProtoJSONOutput(t *testing.T) {
 	}
 }
 
-// ===== JSON body binding =====
+// ===== Body binders (BodyJSON / BodyJSONInto / BodyJSONMap / Body) =====
 
-func TestProxy_JSONBody(t *testing.T) {
+type EchoDTO struct {
+	Text string `json:"text"`
+}
+
+func TestBodyJSONInto(t *testing.T) {
+	client := &wrapperClient{}
+	mux := http.NewServeMux()
+	mux.Handle("POST /echo", composition.Proxy(client.Echo,
+		bind.BodyJSONInto(func(dto EchoDTO, req *wrapperspb.StringValue) error {
+			if dto.Text == "" {
+				return fmt.Errorf("text required")
+			}
+			req.Value = strings.ToUpper(dto.Text)
+			return nil
+		}),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("ok", func(t *testing.T) {
+		resp, _ := http.Post(srv.URL+"/echo", "application/json",
+			strings.NewReader(`{"text":"hello"}`))
+		defer resp.Body.Close()
+		buf, _ := io.ReadAll(resp.Body)
+		got := strings.TrimSpace(string(buf))
+		if got != `"echo:HELLO"` {
+			t.Fatalf("body: got %s", got)
+		}
+	})
+
+	t.Run("apply error → 400", func(t *testing.T) {
+		resp, _ := http.Post(srv.URL+"/echo", "application/json",
+			strings.NewReader(`{"text":""}`))
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+		var body map[string]string
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if !strings.Contains(body["error"], "text required") {
+			t.Fatalf("error: got %q", body["error"])
+		}
+	})
+}
+
+func TestBodyJSONMap(t *testing.T) {
+	client := &wrapperClient{}
+	mux := http.NewServeMux()
+	mux.Handle("POST /echo", composition.Proxy(client.Echo,
+		bind.BodyJSONMap(func(dto EchoDTO, req *wrapperspb.StringValue) {
+			req.Value = strings.ToUpper(dto.Text)
+		}),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Post(srv.URL+"/echo", "application/json",
+		strings.NewReader(`{"text":"hello"}`))
+	defer resp.Body.Close()
+	buf, _ := io.ReadAll(resp.Body)
+	got := strings.TrimSpace(string(buf))
+	if got != `"echo:HELLO"` {
+		t.Fatalf("body: got %s", got)
+	}
+}
+
+func TestBody_CustomParse(t *testing.T) {
+	client := &wrapperClient{}
+	mux := http.NewServeMux()
+	mux.Handle("POST /raw", composition.Proxy(client.Echo,
+		// Treat raw body as the string value directly — demonstrates
+		// the generic escape hatch for non-JSON formats.
+		bind.Body(func(data []byte, req *wrapperspb.StringValue) error {
+			req.Value = string(data)
+			return nil
+		}),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Post(srv.URL+"/raw", "text/plain",
+		strings.NewReader("plain text body"))
+	defer resp.Body.Close()
+	buf, _ := io.ReadAll(resp.Body)
+	got := strings.TrimSpace(string(buf))
+	if got != `"echo:plain text body"` {
+		t.Fatalf("body: got %s", got)
+	}
+}
+
+// ===== BodyJSON (proto-direct via protojson) =====
+
+func TestBodyJSON(t *testing.T) {
 	client := &wrapperClient{}
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /echo", composition.Proxy(client.Echo,
-		bind.JSON[wrapperspb.StringValue](),
+		bind.BodyJSON[wrapperspb.StringValue](),
 	))
 
 	srv := httptest.NewServer(mux)

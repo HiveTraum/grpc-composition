@@ -117,20 +117,57 @@ r.Get("/users",
 
 `PathEnum` / `QueryEnum` accept the canonical proto name (`ROLE_ADMIN`) or its numeric value (`2`). Matching is **strict and case-sensitive** to keep typo detection sharp and behavior aligned with `protojson`; `?role=admin` returns 400. For looser semantics, build a custom parser with `PathAs` / `QueryAs`.
 
-For enum fields in a JSON request body, no extra helper is needed — `protojson.Unmarshal` (used by `bind.JSON`) already accepts both names and numbers.
+For enum fields in a JSON request body, no extra helper is needed — `protojson.Unmarshal` (used by `bind.BodyJSON`) already accepts both names and numbers.
 
-### JSON body + path
+### Request body
+
+The `Body*` family covers everything from "REST body matches the proto shape" (most common) to "REST body has a different shape than the proto" (intentional DTO layer) to "non-JSON formats" (escape hatch).
+
+```go
+// REST body matches the proto shape — direct protojson:
+bind.BodyJSON[pb.AddMemberRequest]()
+
+// REST shape differs and mapping can fail (parsing, validation):
+bind.BodyJSONInto(func(dto CreateUserDTO, req *pb.CreateUserRequest) error {
+    parts := strings.SplitN(dto.FullName, " ", 2)
+    if len(parts) < 2 {
+        return fmt.Errorf("full_name must contain first and last name")
+    }
+    req.GivenName, req.FamilyName, req.Email = parts[0], parts[1], dto.Email
+    return nil
+})
+
+// REST shape differs but mapping is a pure field-copy (no failure mode):
+bind.BodyJSONMap(func(dto CreateUserDTO, req *pb.CreateUserRequest) {
+    req.Name = dto.FullName
+    req.Email = dto.Email
+})
+
+// Non-JSON formats (YAML, raw protobuf wire, form-encoded, ...):
+bind.Body(func(data []byte, req *pb.Req) error {
+    return yaml.Unmarshal(data, req)
+})
+```
+
+| Helper | When |
+|---|---|
+| `bind.BodyJSON[Req]()` | REST body shape matches proto shape; uses `protojson` (handles `oneof`, well-known types, presence correctly) |
+| `bind.BodyJSONInto[Req, DTO](apply ... error)` | REST shape differs; mapping can fail |
+| `bind.BodyJSONMap[Req, DTO](apply)` | REST shape differs; mapping is infallible field-copy |
+| `bind.Body[Req](parse)` | Not JSON; user-supplied parser handles everything |
+
+Combine with other binders in one route — binders run in order:
 
 ```go
 r.Post("/orgs/{org_id}/members",
     app.Proxy(orgClient.AddMember,
-        bind.JSON[pb.AddMemberRequest](),
+        bind.BodyJSON[pb.AddMemberRequest](),
         bind.PathString("org_id", func(req *pb.AddMemberRequest, v string) { req.OrgId = v }),
     ),
 )
 ```
 
-Binders run in the order given — explicit composition. If any setter returns an error, the gRPC call does not happen and the client receives HTTP 400 with the message.
+If any binder returns an error, the gRPC call does not happen and the client receives HTTP 400 with the message.
 
 ### Response mapping (intentional differentiation)
 
@@ -208,7 +245,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | `Proxy[Req, Resp]` via generics, type-safe binding | ✅ Done |
 | `bind.Path` (via `r.PathValue`, stdlib 1.22+) | ✅ Done |
 | `bind.Query` | ✅ Done |
-| `bind.JSON` (protojson + generic `proto.Message` constraint) | ✅ Done |
+| `bind.BodyJSON` (protojson + generic `proto.Message` constraint) — renamed from `bind.JSON` in v0.2 | ✅ Done |
 | Response mapping `Map(func(*Resp) any)` | ✅ Done |
 | HTTP success status override `OnSuccess(int)` | ✅ Done |
 | gRPC `Status` → HTTP code mapping + 5xx redaction | ✅ Done |
@@ -221,6 +258,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | Functional Requirement | Status |
 |---|---|
 | Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`) | ✅ Done |
+| Body family rename + DTO variants (`bind.BodyJSON`, `bind.BodyJSONInto`, `bind.BodyJSONMap`, `bind.Body`); renames `bind.JSON` → `bind.BodyJSON` (breaking) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
 | Metadata forwarding (HTTP header → gRPC metadata, allowlist) | ⏳ Planned |
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) | ⏳ Planned |

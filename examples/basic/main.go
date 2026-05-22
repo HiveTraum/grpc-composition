@@ -130,7 +130,7 @@ func main() {
 
 	// POST /users — JSON body, returns 201 Created on success.
 	mux.Handle("POST /users", composition.Proxy(users.CreateUser,
-		bind.JSON[userpb.CreateUserRequest](),
+		bind.BodyJSON[userpb.CreateUserRequest](),
 	).OnSuccess(http.StatusCreated))
 
 	// GET /users-dto/{id} — same upstream call, different REST shape via Map.
