@@ -305,3 +305,9 @@ Code size for v0.1 — on the order of 400–600 lines.
 3. **Partial-response semantics in `Aggregate`** — per-call `.Optional()` or policy-based (`MinSuccessful(N)`)?
 4. **Multipart / file upload** — direction: `bind.Multipart` streaming into a `bytes` field of the proto.
 5. **Field-level REST exposure** (protection against accidentally leaking newly-added internal proto fields into a public REST API) — separate lint/test tool, not core. Is it needed at all?
+
+---
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
