@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -179,12 +180,15 @@ func TestProxy_GRPCErrorMapping(t *testing.T) {
 				t.Fatalf("status: got %d want %d", resp.StatusCode, tc.wantStatus)
 			}
 
-			var body map[string]string
+			var body composition.ProblemDetails
 			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			if body["error"] != tc.wantMsg {
-				t.Fatalf("error msg: got %q want %q", body["error"], tc.wantMsg)
+			if body.Detail != tc.wantMsg {
+				t.Fatalf("detail: got %q want %q", body.Detail, tc.wantMsg)
+			}
+			if body.Status != tc.wantStatus {
+				t.Fatalf("body.status: got %d want %d", body.Status, tc.wantStatus)
 			}
 		})
 	}
@@ -264,10 +268,10 @@ func TestBodyJSONInto(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status: got %d want 400", resp.StatusCode)
 		}
-		var body map[string]string
+		var body composition.ProblemDetails
 		_ = json.NewDecoder(resp.Body).Decode(&body)
-		if !strings.Contains(body["error"], "text required") {
-			t.Fatalf("error: got %q", body["error"])
+		if !strings.Contains(body.Detail, "text required") {
+			t.Fatalf("detail: got %q", body.Detail)
 		}
 	})
 }
@@ -499,10 +503,10 @@ func TestQueryInt32(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status: got %d want 400", resp.StatusCode)
 		}
-		var body map[string]string
+		var body composition.ProblemDetails
 		_ = json.NewDecoder(resp.Body).Decode(&body)
-		if !strings.Contains(body["error"], "page") {
-			t.Fatalf("error: %q does not contain %q", body["error"], "page")
+		if !strings.Contains(body.Detail, "page") {
+			t.Fatalf("detail: %q does not contain %q", body.Detail, "page")
 		}
 	})
 }
@@ -704,12 +708,12 @@ func TestProxy_BinderError(t *testing.T) {
 		t.Fatalf("status: got %d want 400", resp.StatusCode)
 	}
 
-	var body map[string]string
+	var body composition.ProblemDetails
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(body["error"], "limit") {
-		t.Fatalf("error: got %q want one containing %q", body["error"], "limit")
+	if !strings.Contains(body.Detail, "limit") {
+		t.Fatalf("detail: got %q want one containing %q", body.Detail, "limit")
 	}
 }
 
@@ -748,5 +752,191 @@ func TestSetDefaultPathExtractor(t *testing.T) {
 	// custom extractor's output: "extracted-id".
 	if body.Id != "extracted-id" {
 		t.Fatalf("id: got %q want %q", body.Id, "extracted-id")
+	}
+}
+
+// ===== RFC 7807 error details + WithErrorMapper =====
+
+func TestRFC7807_BadRequest(t *testing.T) {
+	// Server returns InvalidArgument with two field violations,
+	// the way protovalidate or a hand-rolled interceptor would.
+	st, err := status.New(codes.InvalidArgument, "validation failed").WithDetails(
+		&errdetails.BadRequest{
+			FieldViolations: []*errdetails.BadRequest_FieldViolation{
+				{Field: "user.email", Description: "must be a valid email"},
+				{Field: "user.age", Description: "must be >= 18"},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("withDetails: %v", err)
+	}
+	client := &mockClient{getUserErr: st.Err()}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/users/42")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+		t.Fatalf("content-type: got %q want application/problem+json", ct)
+	}
+
+	var body composition.ProblemDetails
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != 400 || body.Title != "Bad Request" || body.Detail != "validation failed" {
+		t.Fatalf("envelope: %+v", body)
+	}
+	if len(body.Errors) != 2 {
+		t.Fatalf("errors: got %d want 2 — %+v", len(body.Errors), body.Errors)
+	}
+	if body.Errors[0].Field != "user.email" || body.Errors[1].Field != "user.age" {
+		t.Fatalf("field violations: %+v", body.Errors)
+	}
+}
+
+func TestRFC7807_ErrorInfo(t *testing.T) {
+	st, err := status.New(codes.ResourceExhausted, "too many requests").WithDetails(
+		&errdetails.ErrorInfo{
+			Reason:   "RATE_LIMIT_EXCEEDED",
+			Domain:   "billing.example.com",
+			Metadata: map[string]string{"retry_after": "60"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("withDetails: %v", err)
+	}
+	client := &mockClient{getUserErr: st.Err()}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/users/42")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status: got %d want 429", resp.StatusCode)
+	}
+
+	var body composition.ProblemDetails
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Reason != "RATE_LIMIT_EXCEEDED" {
+		t.Fatalf("reason: got %q", body.Reason)
+	}
+	if body.Type != "billing.example.com/RATE_LIMIT_EXCEEDED" {
+		t.Fatalf("type: got %q", body.Type)
+	}
+	if body.Metadata["retry_after"] != "60" {
+		t.Fatalf("metadata: %+v", body.Metadata)
+	}
+}
+
+func TestRFC7807_5xx_RedactsDetails(t *testing.T) {
+	// Server returns Internal with details — both message AND details
+	// must be redacted, never reaching the client.
+	st, err := status.New(codes.Internal, "sql: password rejected by host db-master-3").WithDetails(
+		&errdetails.ErrorInfo{Reason: "DB_PASSWORD_INVALID", Domain: "internal"},
+	)
+	if err != nil {
+		t.Fatalf("withDetails: %v", err)
+	}
+	client := &mockClient{getUserErr: st.Err()}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/users/42")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500", resp.StatusCode)
+	}
+
+	var body composition.ProblemDetails
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.Detail != "internal error" {
+		t.Fatalf("detail must be redacted: got %q", body.Detail)
+	}
+	if body.Reason != "" || body.Type != "" {
+		t.Fatalf("details must be redacted: %+v", body)
+	}
+	if strings.Contains(body.Detail, "password") || strings.Contains(body.Detail, "db-master-3") {
+		t.Fatalf("upstream secrets leaked into 5xx body: %q", body.Detail)
+	}
+}
+
+func TestWithErrorMapper_PerRoute(t *testing.T) {
+	client := &mockClient{getUserErr: status.Error(codes.NotFound, "no user")}
+
+	// Per-route mapper that produces a totally different shape (e.g. legacy API).
+	legacy := func(err error) (int, any) {
+		return 418, map[string]string{"legacy_code": "TEAPOT", "msg": err.Error()}
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).WithErrorMapper(legacy))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/users/42")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTeapot {
+		t.Fatalf("status: got %d want 418 (per-route mapper)", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type: got %q want application/json (non-Problem body)", ct)
+	}
+
+	var body map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body["legacy_code"] != "TEAPOT" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+func TestSetDefaultErrorMapper(t *testing.T) {
+	composition.SetDefaultErrorMapper(func(err error) (int, any) {
+		return 599, map[string]string{"custom": "yes", "msg": err.Error()}
+	})
+	defer composition.SetDefaultErrorMapper(nil) // restore RFC 7807 default
+
+	client := &mockClient{getUserErr: status.Error(codes.NotFound, "x")}
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/users/42")
+	defer resp.Body.Close()
+	if resp.StatusCode != 599 {
+		t.Fatalf("status: got %d want 599 (custom default)", resp.StatusCode)
+	}
+	var body map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body["custom"] != "yes" {
+		t.Fatalf("body: %+v", body)
 	}
 }

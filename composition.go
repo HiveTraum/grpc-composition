@@ -70,6 +70,7 @@ type Route[Req, Resp any] struct {
 	binders       []Binder[Req]
 	mapper        func(*Resp) any
 	successStatus int
+	errorMapper   ErrorMapper // nil → use package-level DefaultErrorMapper
 }
 
 // Proxy returns a [Route] that:
@@ -111,13 +112,28 @@ func (rt *Route[Req, Resp]) OnSuccess(status int) *Route[Req, Resp] {
 	return rt
 }
 
+// WithErrorMapper overrides the package-level [DefaultErrorMapper] for
+// this route only. Useful when one endpoint has special-case error
+// formatting (e.g. a legacy API contract) while the rest of the service
+// follows the default RFC 7807 shape.
+//
+//	route.WithErrorMapper(func(err error) (int, any) {
+//	    return 500, map[string]string{"code": "X-LEGACY"}
+//	})
+func (rt *Route[Req, Resp]) WithErrorMapper(fn ErrorMapper) *Route[Req, Resp] {
+	rt.errorMapper = fn
+	return rt
+}
+
 // ServeHTTP implements [http.Handler].
 func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req Req
 	for _, b := range rt.binders {
 		if err := b(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "bind: " + err.Error(),
+			writeError(w, http.StatusBadRequest, ProblemDetails{
+				Status: http.StatusBadRequest,
+				Title:  http.StatusText(http.StatusBadRequest),
+				Detail: "bind: " + err.Error(),
 			})
 			return
 		}
@@ -125,8 +141,12 @@ func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := rt.method(r.Context(), &req)
 	if err != nil {
-		status, body := DefaultErrorMapper(err)
-		writeJSON(w, status, body)
+		mapper := rt.errorMapper
+		if mapper == nil {
+			mapper = DefaultErrorMapper
+		}
+		status, body := mapper(err)
+		writeError(w, status, body)
 		return
 	}
 
@@ -135,6 +155,19 @@ func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeResponse(w, rt.successStatus, resp)
+}
+
+// writeError writes an error response. If the body is a [ProblemDetails],
+// Content-Type is set to application/problem+json (RFC 7807); otherwise
+// to application/json so custom mappers can return arbitrary shapes.
+func writeError(w http.ResponseWriter, status int, body any) {
+	if _, ok := body.(ProblemDetails); ok {
+		w.Header().Set("Content-Type", "application/problem+json")
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // writeResponse writes resp as protojson when it is a [proto.Message]; this

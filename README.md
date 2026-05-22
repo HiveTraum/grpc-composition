@@ -228,9 +228,37 @@ Canceled           -> 499
 Internal/Unknown   -> 500
 ```
 
-5xx responses do **not** propagate the upstream gRPC status message — they return a generic "internal error" so the client gets only a request-id for log correlation. Customize via `WithErrorMapper`.
+### RFC 7807 response shape
 
-Structured error details (`google.rpc.BadRequest`, `ErrorInfo`) — deferred to v0.2.
+The default error body follows [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807) with two gRPC-aware extensions, and the response is served as `application/problem+json`:
+
+```json
+{
+  "type": "billing.example.com/RATE_LIMIT_EXCEEDED",
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "too many requests",
+  "reason": "RATE_LIMIT_EXCEEDED",
+  "metadata": { "retry_after": "60" },
+  "errors": [
+    { "field": "user.email", "description": "must be a valid email" }
+  ]
+}
+```
+
+- `errors[]` is populated from `google.rpc.BadRequest.FieldViolations` attached to the gRPC status via `status.WithDetails`. This is what `protovalidate-go` produces — field-level validation failures appear here.
+- `reason`, `type`, `metadata` are populated from `google.rpc.ErrorInfo`.
+
+### 5xx redaction
+
+5xx responses do **not** propagate the upstream gRPC status message or details — they return a generic `"detail": "internal error"` so server-side state never leaks to clients. Pair with a request-id middleware for log correlation.
+
+### Customization
+
+- Per route: `route.WithErrorMapper(fn)` overrides for one endpoint
+- Globally: `composition.SetDefaultErrorMapper(fn)` replaces the default mapper at program start
+
+A custom mapper can return any body shape; only `composition.ProblemDetails` triggers the `application/problem+json` Content-Type. Other shapes get `application/json`.
 
 ---
 
@@ -261,8 +289,8 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | Body family rename + DTO variants (`bind.BodyJSON`, `bind.BodyJSONInto`, `bind.BodyJSONMap`, `bind.Body`); renames `bind.JSON` → `bind.BodyJSON` (breaking) | ✅ Done |
 | `bind.Header` | ⏳ Planned |
 | Metadata forwarding (HTTP header → gRPC metadata, allowlist) | ⏳ Planned |
-| RFC 7807 error details (BadRequest field violations, ErrorInfo) | ⏳ Planned |
-| `WithErrorMapper` per-route override | ⏳ Planned |
+| RFC 7807 error details (BadRequest field violations, ErrorInfo) + `application/problem+json` | ✅ Done |
+| `WithErrorMapper` per-route + `SetDefaultErrorMapper` package-level | ✅ Done |
 | Additional typed sugar for `Float64`, `UUID`, `time.Time` | ⏳ Planned |
 
 > **Validation:** use [`protovalidate-go`](https://github.com/bufbuild/protovalidate-go) as a gRPC unary client interceptor. Violations arrive as `codes.InvalidArgument` with `status.WithDetails(*errdetails.BadRequest)` and surface as HTTP 400 field errors via RFC 7807 error details (see above). No framework-level hook is needed.
