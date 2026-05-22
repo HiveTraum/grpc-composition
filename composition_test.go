@@ -1035,3 +1035,165 @@ func TestApp_MetadataForward_MultipleValues(t *testing.T) {
 		t.Fatalf("accept-language: %v", got)
 	}
 }
+
+// ===== Header binders =====
+
+type HeaderReq struct {
+	TenantID string
+	Limit    int32
+	Strict   bool
+	Ratio    float64
+}
+type HeaderResp struct {
+	TenantID string
+	Limit    int32
+	Strict   bool
+	Ratio    float64
+}
+
+type headerClient struct{}
+
+func (c *headerClient) Echo(_ context.Context, req *HeaderReq, _ ...grpc.CallOption) (*HeaderResp, error) {
+	return &HeaderResp{TenantID: req.TenantID, Limit: req.Limit, Strict: req.Strict, Ratio: req.Ratio}, nil
+}
+
+func TestHeaderString(t *testing.T) {
+	client := &headerClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /h", composition.Proxy(client.Echo,
+		bind.HeaderString("X-Tenant-ID", func(req *HeaderReq, v string) { req.TenantID = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/h", nil)
+	req.Header.Set("X-Tenant-ID", "acme-co")
+	resp, _ := http.DefaultClient.Do(req)
+	defer resp.Body.Close()
+
+	var body HeaderResp
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if body.TenantID != "acme-co" {
+		t.Fatalf("tenant_id: %q", body.TenantID)
+	}
+}
+
+func TestHeader_RequiredMissing(t *testing.T) {
+	client := &headerClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /h", composition.Proxy(client.Echo,
+		bind.Header("X-Tenant-ID", func(req *HeaderReq, v string) error {
+			if v == "" {
+				return fmt.Errorf("X-Tenant-ID is required")
+			}
+			req.TenantID = v
+			return nil
+		}),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/h")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+	var body composition.ProblemDetails
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	if !strings.Contains(body.Detail, "X-Tenant-ID") {
+		t.Fatalf("detail: %q", body.Detail)
+	}
+}
+
+func TestHeaderInt32(t *testing.T) {
+	client := &headerClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /h", composition.Proxy(client.Echo,
+		bind.HeaderInt32("X-Rate-Limit", func(req *HeaderReq, v int32) { req.Limit = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("present", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", srv.URL+"/h", nil)
+		req.Header.Set("X-Rate-Limit", "100")
+		resp, _ := http.DefaultClient.Do(req)
+		defer resp.Body.Close()
+		var body HeaderResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Limit != 100 {
+			t.Fatalf("limit: %d", body.Limit)
+		}
+	})
+
+	t.Run("absent → zero", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/h")
+		defer resp.Body.Close()
+		var body HeaderResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Limit != 0 {
+			t.Fatalf("limit: got %d want 0", body.Limit)
+		}
+	})
+
+	t.Run("bad value → 400", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", srv.URL+"/h", nil)
+		req.Header.Set("X-Rate-Limit", "oops")
+		resp, _ := http.DefaultClient.Do(req)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d want 400", resp.StatusCode)
+		}
+	})
+}
+
+func TestPathFloat64_QueryFloat64(t *testing.T) {
+	client := &headerClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /scale/{ratio}", composition.Proxy(client.Echo,
+		bind.PathFloat64("ratio", func(req *HeaderReq, v float64) { req.Ratio = v }),
+	))
+	mux.Handle("GET /q", composition.Proxy(client.Echo,
+		bind.QueryFloat64("ratio", func(req *HeaderReq, v float64) { req.Ratio = v }),
+	))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Run("PathFloat64 ok", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/scale/0.5")
+		defer resp.Body.Close()
+		var body HeaderResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Ratio != 0.5 {
+			t.Fatalf("ratio: %v", body.Ratio)
+		}
+	})
+
+	t.Run("PathFloat64 bad → 400", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/scale/oops")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status: got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("QueryFloat64 absent", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/q")
+		defer resp.Body.Close()
+		var body HeaderResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Ratio != 0 {
+			t.Fatalf("ratio: %v want 0", body.Ratio)
+		}
+	})
+
+	t.Run("QueryFloat64 present", func(t *testing.T) {
+		resp, _ := http.Get(srv.URL + "/q?ratio=3.14")
+		defer resp.Body.Close()
+		var body HeaderResp
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if body.Ratio != 3.14 {
+			t.Fatalf("ratio: %v", body.Ratio)
+		}
+	})
+}

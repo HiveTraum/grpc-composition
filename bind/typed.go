@@ -60,6 +60,31 @@ func QueryAs[Req any, T any](
 	}
 }
 
+// HeaderAs binds an HTTP request header parsed via the supplied function.
+// Missing (empty) headers are treated as "not provided": parse is NOT
+// called, the setter is NOT invoked, and the field is left at its zero
+// value. Parse errors surface as HTTP 400 with the header name prefix.
+//
+// Use for non-string types not covered by the typed sugar helpers.
+func HeaderAs[Req any, T any](
+	name string,
+	parse func(string) (T, error),
+	setter func(*Req, T),
+) composition.Binder[Req] {
+	return func(r *http.Request, req *Req) error {
+		raw := r.Header.Get(name)
+		if raw == "" {
+			return nil
+		}
+		v, err := parse(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		setter(req, v)
+		return nil
+	}
+}
+
 // parseInt32 / parseInt64 / strconv.ParseBool back the typed sugar below.
 
 func parseInt32(s string) (int32, error) {
@@ -69,6 +94,10 @@ func parseInt32(s string) (int32, error) {
 
 func parseInt64(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
+}
+
+func parseFloat64(s string) (float64, error) {
+	return strconv.ParseFloat(s, 64)
 }
 
 // ===== Sugar for common proto scalar types =====
@@ -109,6 +138,11 @@ func PathBool[Req any](name string, setter func(*Req, bool)) composition.Binder[
 	return PathAs(name, strconv.ParseBool, setter)
 }
 
+// PathFloat64 binds a required path parameter parsed as float64.
+func PathFloat64[Req any](name string, setter func(*Req, float64)) composition.Binder[Req] {
+	return PathAs(name, parseFloat64, setter)
+}
+
 // QueryString binds a query parameter as a string field. Missing values
 // pass an empty string to the setter (consistent with how protobuf
 // represents an absent string). The setter does not return an error.
@@ -139,6 +173,32 @@ func QueryInt64[Req any](name string, setter func(*Req, int64)) composition.Bind
 // QueryBool binds an optional query parameter parsed as bool.
 func QueryBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
 	return QueryAs(name, strconv.ParseBool, setter)
+}
+
+// QueryFloat64 binds an optional query parameter parsed as float64.
+func QueryFloat64[Req any](name string, setter func(*Req, float64)) composition.Binder[Req] {
+	return QueryAs(name, parseFloat64, setter)
+}
+
+// HeaderInt32 binds an optional HTTP header parsed as int32.
+// Missing header leaves the field at zero.
+func HeaderInt32[Req any](name string, setter func(*Req, int32)) composition.Binder[Req] {
+	return HeaderAs(name, parseInt32, setter)
+}
+
+// HeaderInt64 binds an optional HTTP header parsed as int64.
+func HeaderInt64[Req any](name string, setter func(*Req, int64)) composition.Binder[Req] {
+	return HeaderAs(name, parseInt64, setter)
+}
+
+// HeaderBool binds an optional HTTP header parsed as bool.
+func HeaderBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
+	return HeaderAs(name, strconv.ParseBool, setter)
+}
+
+// HeaderFloat64 binds an optional HTTP header parsed as float64.
+func HeaderFloat64[Req any](name string, setter func(*Req, float64)) composition.Binder[Req] {
+	return HeaderAs(name, parseFloat64, setter)
 }
 
 // ===== Enum binders =====

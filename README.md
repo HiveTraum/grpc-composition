@@ -103,7 +103,13 @@ Parse errors automatically bubble up as HTTP 400 with the parameter name as a pr
 
 **Semantic difference:** `Path*` treats the parameter as required (an empty value yields a 400); `Query*` is optional (an empty value leaves the field at zero, no error).
 
-Available helpers: `PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`. UUID / time / float — through `*As` with a user-supplied parser for now.
+Available helpers:
+
+- **Path**: `PathString`, `PathInt32`, `PathInt64`, `PathFloat64`, `PathBool`, `PathEnum`, `PathAs`
+- **Query**: `QueryString`, `QueryInt32`, `QueryInt64`, `QueryFloat64`, `QueryBool`, `QueryEnum`, `QueryAs`
+- **Header**: `HeaderString`, `HeaderInt32`, `HeaderInt64`, `HeaderFloat64`, `HeaderBool`, `HeaderAs` (plus generic `Header` with error)
+
+UUID / time — through `*As` with a user-supplied parser. `HeaderEnum` is planned for v0.3.
 
 ### Protobuf enums
 
@@ -312,11 +318,12 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 |---|---|
 | Typed sugar binders (`PathString`, `PathInt32`, `PathInt64`, `PathBool`, `PathEnum`, `PathAs`, `QueryString`, `QueryInt32`, `QueryInt64`, `QueryBool`, `QueryEnum`, `QueryAs`) | ✅ Done |
 | Body family rename + DTO variants (`bind.BodyJSON`, `bind.BodyJSONInto`, `bind.BodyJSONMap`, `bind.Body`); renames `bind.JSON` → `bind.BodyJSON` (breaking) | ✅ Done |
-| `bind.Header` | ⏳ Planned |
+| `bind.Header` family (`Header`, `HeaderString`, `HeaderInt32`, `HeaderInt64`, `HeaderFloat64`, `HeaderBool`, `HeaderAs`) | ✅ Done |
 | Metadata forwarding (HTTP header → gRPC metadata, allowlist) via `App.Handler` | ✅ Done |
 | RFC 7807 error details (BadRequest field violations, ErrorInfo) + `application/problem+json` | ✅ Done |
 | `WithErrorMapper` per-route + `SetDefaultErrorMapper` package-level | ✅ Done |
-| Additional typed sugar for `Float64`, `UUID`, `time.Time` | ⏳ Planned |
+| Additional typed sugar for `Float64` (Path/Query/Header) | ✅ Done |
+| Additional typed sugar for `UUID`, `time.Time` | ⏳ Planned |
 
 > **Validation:** use [`protovalidate-go`](https://github.com/bufbuild/protovalidate-go) as a gRPC unary client interceptor. Violations arrive as `codes.InvalidArgument` with `status.WithDetails(*errdetails.BadRequest)` and surface as HTTP 400 field errors via RFC 7807 error details (see above). No framework-level hook is needed.
 
