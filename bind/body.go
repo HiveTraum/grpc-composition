@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 
 	"github.com/HiveTraum/grpc-composition"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -64,12 +65,15 @@ func readBody(r *http.Request) ([]byte, error) {
 // Duration, FieldMask), oneof variants and presence semantics are
 // handled correctly.
 func BodyJSON[Req any, PReq protoPtr[Req]]() composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		body, err := readBody(r)
-		if err != nil {
-			return err
-		}
-		return protojson.Unmarshal(body, PReq(req))
+	return bodyBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			body, err := readBody(r)
+			if err != nil {
+				return err
+			}
+			return protojson.Unmarshal(body, PReq(req))
+		},
+		spec: composition.BodySpec{Proto: PReq(new(Req))},
 	}
 }
 
@@ -97,16 +101,19 @@ func BodyJSON[Req any, PReq protoPtr[Req]]() composition.Binder[Req] {
 //	    return nil
 //	})
 func BodyJSONInto[Req any, DTO any](apply func(DTO, *Req) error) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		data, err := readBody(r)
-		if err != nil {
-			return err
-		}
-		var dto DTO
-		if err := json.Unmarshal(data, &dto); err != nil {
-			return err
-		}
-		return apply(dto, req)
+	return bodyBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			data, err := readBody(r)
+			if err != nil {
+				return err
+			}
+			var dto DTO
+			if err := json.Unmarshal(data, &dto); err != nil {
+				return err
+			}
+			return apply(dto, req)
+		},
+		spec: composition.BodySpec{DTO: reflect.TypeFor[DTO]()},
 	}
 }
 
@@ -124,17 +131,20 @@ func BodyJSONInto[Req any, DTO any](apply func(DTO, *Req) error) composition.Bin
 //
 // For mappings that can fail, use [BodyJSONInto] instead.
 func BodyJSONMap[Req any, DTO any](apply func(DTO, *Req)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		data, err := readBody(r)
-		if err != nil {
-			return err
-		}
-		var dto DTO
-		if err := json.Unmarshal(data, &dto); err != nil {
-			return err
-		}
-		apply(dto, req)
-		return nil
+	return bodyBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			data, err := readBody(r)
+			if err != nil {
+				return err
+			}
+			var dto DTO
+			if err := json.Unmarshal(data, &dto); err != nil {
+				return err
+			}
+			apply(dto, req)
+			return nil
+		},
+		spec: composition.BodySpec{DTO: reflect.TypeFor[DTO]()},
 	}
 }
 
@@ -154,11 +164,16 @@ func BodyJSONMap[Req any, DTO any](apply func(DTO, *Req)) composition.Binder[Req
 //	    return yaml.Unmarshal(data, req)
 //	})
 func Body[Req any](parse func([]byte, *Req) error) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		data, err := readBody(r)
-		if err != nil {
-			return err
-		}
-		return parse(data, req)
+	return bodyBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			data, err := readBody(r)
+			if err != nil {
+				return err
+			}
+			return parse(data, req)
+		},
+		// The parse function is opaque — the body is consumed but its
+		// schema is unknown.
+		spec: composition.BodySpec{},
 	}
 }

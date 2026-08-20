@@ -21,8 +21,11 @@ import (
 //	    return nil
 //	})
 func Header[Req any](name string, setter func(*Req, string) error) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		return setter(req, r.Header.Get(name))
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			return setter(req, r.Header.Get(name))
+		},
+		spec: headerSpec(name, "string", ""),
 	}
 }
 
@@ -35,8 +38,11 @@ func Header[Req any](name string, setter func(*Req, string) error) composition.B
 // Use [Header] when you need to validate the value (e.g. required
 // header policy) and surface a 400 with a descriptive message.
 func HeaderString[Req any](name string, setter func(*Req, string)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		setter(req, r.Header.Get(name))
-		return nil
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			setter(req, r.Header.Get(name))
+			return nil
+		},
+		spec: headerSpec(name, "string", ""),
 	}
 }

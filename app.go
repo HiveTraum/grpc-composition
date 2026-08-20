@@ -1,6 +1,7 @@
 package composition
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -32,6 +33,15 @@ import (
 type App struct {
 	mux             *http.ServeMux
 	metadataForward []string // canonical lowercase header names
+	operations      []registeredOperation
+}
+
+// registeredOperation remembers a proxy route registered via the verb
+// methods, for [App.Operations].
+type registeredOperation struct {
+	method  string
+	pattern string
+	route   describable
 }
 
 // AppOption configures an [App] at construction time.
@@ -102,9 +112,61 @@ func (a *App) Delete[Req, Resp any](pattern string, method UnaryMethod[Req, Resp
 }
 
 func (a *App) handleVerb[Req, Resp any](verb, pattern string, method UnaryMethod[Req, Resp], binders []Binder[Req]) *Route[Req, Resp] {
+	validatePathBinders(verb, pattern, binders)
 	rt := Proxy(method, binders...)
 	a.mux.Handle(verb+" "+pattern, rt)
+	a.operations = append(a.operations, registeredOperation{method: verb, pattern: pattern, route: rt})
 	return rt
+}
+
+// validatePathBinders panics at registration time when a path binder
+// declares a parameter absent from the route pattern — a typo that would
+// otherwise surface as a 400 on the first request, not at boot.
+func validatePathBinders[Req any](verb, pattern string, binders []Binder[Req]) {
+	names := patternPathParams(pattern)
+	for _, b := range binders {
+		pd, ok := b.(ParamDocumenter)
+		if !ok {
+			continue
+		}
+		spec := pd.ParamSpec()
+		if spec.In != InPath {
+			continue
+		}
+		if !names[spec.Name] {
+			panic(fmt.Sprintf("composition: route %q: path binder %q has no matching {%s} segment in the pattern",
+				verb+" "+pattern, spec.Name, spec.Name))
+		}
+	}
+}
+
+// patternPathParams extracts the {name} segments of a ServeMux pattern.
+func patternPathParams(pattern string) map[string]bool {
+	names := make(map[string]bool)
+	for _, seg := range strings.Split(pattern, "/") {
+		if len(seg) >= 2 && seg[0] == '{' && seg[len(seg)-1] == '}' {
+			name := strings.TrimSuffix(seg[1:len(seg)-1], "...")
+			if name != "" && name != "$" {
+				names[name] = true
+			}
+		}
+	}
+	return names
+}
+
+// Operations returns a snapshot of the proxy routes registered via the
+// verb methods, for documentation generators (see the openapi
+// subpackage). Handlers registered via [App.Handle] — [Aggregate]
+// endpoints and arbitrary handlers — are opaque and not included.
+func (a *App) Operations() []OperationInfo {
+	ops := make([]OperationInfo, 0, len(a.operations))
+	for _, op := range a.operations {
+		info := op.route.operationInfo()
+		info.Method = op.method
+		info.Pattern = op.pattern
+		ops = append(ops, info)
+	}
+	return ops
 }
 
 // Handle registers an arbitrary [http.Handler] on the App's router.

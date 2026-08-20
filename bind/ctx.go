@@ -29,13 +29,16 @@ import (
 // — the middleware that should have populated (or rejected) the request
 // did not run — so prefer rejecting unauthenticated requests in
 // middleware and treating Ctx as infallible plumbing.
+//
+// A Ctx binder consumes no HTTP-visible input, so it carries no parameter
+// metadata and never appears in generated OpenAPI documents.
 func Ctx[Req any, V any](get func(ctx context.Context) (V, error), setter func(*Req, V)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
+	return composition.BinderFunc[Req](func(r *http.Request, req *Req) error {
 		v, err := get(r.Context())
 		if err != nil {
 			return fmt.Errorf("context: %w", err)
 		}
 		setter(req, v)
 		return nil
-	}
+	})
 }

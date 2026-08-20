@@ -36,7 +36,10 @@ import (
 //	    return nil
 //	})
 func Path[Req any](name string, setter func(*Req, string) error) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		return setter(req, composition.PathParam(r, name))
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			return setter(req, composition.PathParam(r, name))
+		},
+		spec: pathSpec(name, "string", ""),
 	}
 }

@@ -9,6 +9,78 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+// pathAs backs PathAs and the typed path sugar: required semantics, parse
+// errors wrapped with the parameter name, spec typed per constructor.
+func pathAs[Req any, T any](
+	name string,
+	parse func(string) (T, error),
+	setter func(*Req, T),
+	typ, format string,
+) composition.Binder[Req] {
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			v, err := parse(composition.PathParam(r, name))
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			setter(req, v)
+			return nil
+		},
+		spec: pathSpec(name, typ, format),
+	}
+}
+
+// queryAs backs QueryAs and the typed query sugar: optional semantics
+// (empty value leaves the field at zero), parse errors wrapped with the
+// parameter name.
+func queryAs[Req any, T any](
+	name string,
+	parse func(string) (T, error),
+	setter func(*Req, T),
+	typ, format string,
+) composition.Binder[Req] {
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			raw := r.URL.Query().Get(name)
+			if raw == "" {
+				return nil
+			}
+			v, err := parse(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			setter(req, v)
+			return nil
+		},
+		spec: querySpec(name, typ, format),
+	}
+}
+
+// headerAs backs HeaderAs and the typed header sugar: optional semantics,
+// parse errors wrapped with the header name.
+func headerAs[Req any, T any](
+	name string,
+	parse func(string) (T, error),
+	setter func(*Req, T),
+	typ, format string,
+) composition.Binder[Req] {
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			raw := r.Header.Get(name)
+			if raw == "" {
+				return nil
+			}
+			v, err := parse(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			setter(req, v)
+			return nil
+		},
+		spec: headerSpec(name, typ, format),
+	}
+}
+
 // PathAs binds a path parameter parsed via the supplied function.
 //
 // The path value is treated as REQUIRED: an empty string is passed to
@@ -26,14 +98,7 @@ func PathAs[Req any, T any](
 	parse func(string) (T, error),
 	setter func(*Req, T),
 ) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		v, err := parse(composition.PathParam(r, name))
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		setter(req, v)
-		return nil
-	}
+	return pathAs(name, parse, setter, "string", "")
 }
 
 // QueryAs binds a query parameter parsed via the supplied function.
@@ -46,18 +111,7 @@ func QueryAs[Req any, T any](
 	parse func(string) (T, error),
 	setter func(*Req, T),
 ) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		raw := r.URL.Query().Get(name)
-		if raw == "" {
-			return nil
-		}
-		v, err := parse(raw)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		setter(req, v)
-		return nil
-	}
+	return queryAs(name, parse, setter, "string", "")
 }
 
 // HeaderAs binds an HTTP request header parsed via the supplied function.
@@ -71,18 +125,7 @@ func HeaderAs[Req any, T any](
 	parse func(string) (T, error),
 	setter func(*Req, T),
 ) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		raw := r.Header.Get(name)
-		if raw == "" {
-			return nil
-		}
-		v, err := parse(raw)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		setter(req, v)
-		return nil
-	}
+	return headerAs(name, parse, setter, "string", "")
 }
 
 // parseInt32 / parseInt64 / strconv.ParseBool back the typed sugar below.
@@ -111,9 +154,12 @@ func parseFloat64(s string) (float64, error) {
 // Use [Path] instead when you need to validate the string and surface
 // the validation error as HTTP 400.
 func PathString[Req any](name string, setter func(*Req, string)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		setter(req, composition.PathParam(r, name))
-		return nil
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			setter(req, composition.PathParam(r, name))
+			return nil
+		},
+		spec: pathSpec(name, "string", ""),
 	}
 }
 
@@ -121,12 +167,12 @@ func PathString[Req any](name string, setter func(*Req, string)) composition.Bin
 //
 //	bind.PathInt32("page", func(req *pb.ListReq, v int32) { req.Page = v })
 func PathInt32[Req any](name string, setter func(*Req, int32)) composition.Binder[Req] {
-	return PathAs(name, parseInt32, setter)
+	return pathAs(name, parseInt32, setter, "integer", "int32")
 }
 
 // PathInt64 binds a required path parameter parsed as int64.
 func PathInt64[Req any](name string, setter func(*Req, int64)) composition.Binder[Req] {
-	return PathAs(name, parseInt64, setter)
+	return pathAs(name, parseInt64, setter, "integer", "int64")
 }
 
 // PathBool binds a required path parameter parsed as bool.
@@ -135,12 +181,12 @@ func PathInt64[Req any](name string, setter func(*Req, int64)) composition.Binde
 // "1", "t", "T", "TRUE", "true", "True" → true;
 // "0", "f", "F", "FALSE", "false", "False" → false.
 func PathBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
-	return PathAs(name, strconv.ParseBool, setter)
+	return pathAs(name, strconv.ParseBool, setter, "boolean", "")
 }
 
 // PathFloat64 binds a required path parameter parsed as float64.
 func PathFloat64[Req any](name string, setter func(*Req, float64)) composition.Binder[Req] {
-	return PathAs(name, parseFloat64, setter)
+	return pathAs(name, parseFloat64, setter, "number", "double")
 }
 
 // QueryString binds a query parameter as a string field. Missing values
@@ -151,9 +197,12 @@ func PathFloat64[Req any](name string, setter func(*Req, float64)) composition.B
 //
 // Use [Query] instead when you need to validate the string.
 func QueryString[Req any](name string, setter func(*Req, string)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		setter(req, r.URL.Query().Get(name))
-		return nil
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			setter(req, r.URL.Query().Get(name))
+			return nil
+		},
+		spec: querySpec(name, "string", ""),
 	}
 }
 
@@ -162,43 +211,43 @@ func QueryString[Req any](name string, setter func(*Req, string)) composition.Bi
 //
 //	bind.QueryInt32("limit", func(req *pb.ListReq, v int32) { req.Limit = v })
 func QueryInt32[Req any](name string, setter func(*Req, int32)) composition.Binder[Req] {
-	return QueryAs(name, parseInt32, setter)
+	return queryAs(name, parseInt32, setter, "integer", "int32")
 }
 
 // QueryInt64 binds an optional query parameter parsed as int64.
 func QueryInt64[Req any](name string, setter func(*Req, int64)) composition.Binder[Req] {
-	return QueryAs(name, parseInt64, setter)
+	return queryAs(name, parseInt64, setter, "integer", "int64")
 }
 
 // QueryBool binds an optional query parameter parsed as bool.
 func QueryBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
-	return QueryAs(name, strconv.ParseBool, setter)
+	return queryAs(name, strconv.ParseBool, setter, "boolean", "")
 }
 
 // QueryFloat64 binds an optional query parameter parsed as float64.
 func QueryFloat64[Req any](name string, setter func(*Req, float64)) composition.Binder[Req] {
-	return QueryAs(name, parseFloat64, setter)
+	return queryAs(name, parseFloat64, setter, "number", "double")
 }
 
 // HeaderInt32 binds an optional HTTP header parsed as int32.
 // Missing header leaves the field at zero.
 func HeaderInt32[Req any](name string, setter func(*Req, int32)) composition.Binder[Req] {
-	return HeaderAs(name, parseInt32, setter)
+	return headerAs(name, parseInt32, setter, "integer", "int32")
 }
 
 // HeaderInt64 binds an optional HTTP header parsed as int64.
 func HeaderInt64[Req any](name string, setter func(*Req, int64)) composition.Binder[Req] {
-	return HeaderAs(name, parseInt64, setter)
+	return headerAs(name, parseInt64, setter, "integer", "int64")
 }
 
 // HeaderBool binds an optional HTTP header parsed as bool.
 func HeaderBool[Req any](name string, setter func(*Req, bool)) composition.Binder[Req] {
-	return HeaderAs(name, strconv.ParseBool, setter)
+	return headerAs(name, strconv.ParseBool, setter, "boolean", "")
 }
 
 // HeaderFloat64 binds an optional HTTP header parsed as float64.
 func HeaderFloat64[Req any](name string, setter func(*Req, float64)) composition.Binder[Req] {
-	return HeaderAs(name, parseFloat64, setter)
+	return headerAs(name, parseFloat64, setter, "number", "double")
 }
 
 // ===== Enum binders =====
@@ -208,6 +257,12 @@ func HeaderFloat64[Req any](name string, setter func(*Req, float64)) composition
 type protoEnum interface {
 	~int32
 	protoreflect.Enum
+}
+
+func enumSpec[T protoEnum](spec composition.ParamSpec) composition.ParamSpec {
+	var zero T
+	spec.Enum = enumValueNames(zero.Descriptor())
+	return spec
 }
 
 // PathEnum binds a path parameter to a protobuf enum field.
@@ -221,14 +276,17 @@ type protoEnum interface {
 // Case-insensitive or alias-based matching is intentionally not built in:
 // use [PathAs] with a custom parser if you need looser semantics.
 func PathEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		var zero T
-		n, err := lookupEnum(zero.Descriptor(), composition.PathParam(r, name))
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		setter(req, T(n))
-		return nil
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			var zero T
+			n, err := lookupEnum(zero.Descriptor(), composition.PathParam(r, name))
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			setter(req, T(n))
+			return nil
+		},
+		spec: enumSpec[T](pathSpec(name, "string", "")),
 	}
 }
 
@@ -239,18 +297,21 @@ func PathEnum[Req any, T protoEnum](name string, setter func(*Req, T)) compositi
 //
 //	bind.QueryEnum("role", func(req *pb.Req, v pb.Role) { req.Role = v })
 func QueryEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		raw := r.URL.Query().Get(name)
-		if raw == "" {
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			raw := r.URL.Query().Get(name)
+			if raw == "" {
+				return nil
+			}
+			var zero T
+			n, err := lookupEnum(zero.Descriptor(), raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			setter(req, T(n))
 			return nil
-		}
-		var zero T
-		n, err := lookupEnum(zero.Descriptor(), raw)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		setter(req, T(n))
-		return nil
+		},
+		spec: enumSpec[T](querySpec(name, "string", "")),
 	}
 }
 
@@ -262,18 +323,21 @@ func QueryEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composit
 //
 //	bind.HeaderEnum("X-Role", func(req *pb.Req, v pb.Role) { req.Role = v })
 func HeaderEnum[Req any, T protoEnum](name string, setter func(*Req, T)) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		raw := r.Header.Get(name)
-		if raw == "" {
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			raw := r.Header.Get(name)
+			if raw == "" {
+				return nil
+			}
+			var zero T
+			n, err := lookupEnum(zero.Descriptor(), raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			setter(req, T(n))
 			return nil
-		}
-		var zero T
-		n, err := lookupEnum(zero.Descriptor(), raw)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		setter(req, T(n))
-		return nil
+		},
+		spec: enumSpec[T](headerSpec(name, "string", "")),
 	}
 }
 

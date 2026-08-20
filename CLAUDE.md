@@ -9,11 +9,13 @@
 ## Layout
 
 - `README.md` — vision: scope, principles, Implementation Status, open questions
-- `app.go` — `App`: роутер (`Get`/`Post`/`Put`/`Patch`/`Delete`/`Handle`, сам `http.Handler`) + сквозные концерны (проброс метаданных)
-- `composition.go`, `errors.go` — core: `Proxy`, `Route`, `Binder`, `PathExtractor`, gRPC→HTTP error mapping (включая `MapReasons`), protojson-опции сериализации
-- `bind/` — биндеры (`Path`, `Query`, `Header`, `Body*` с лимитом размера, `Ctx` + типизированные `*Int32`/`*Int64`/`*Bool`/`*As`)
+- `app.go` — `App`: роутер (`Get`/`Post`/`Put`/`Patch`/`Delete`/`Handle`, сам `http.Handler`) + сквозные концерны (проброс метаданных), реестр операций (`Operations`) и boot-валидация path-биндеров
+- `composition.go`, `errors.go` — core: `Proxy`, `Route`, `Binder` (интерфейс) + `BinderFunc`, `PathExtractor`, gRPC→HTTP error mapping (включая `MapReasons`), protojson-опции сериализации
+- `spec.go` — метаданные для генерации доков: `ParamSpec`/`BodySpec`, `Doc`, `OperationInfo`
+- `bind/` — биндеры (`Path`, `Query`, `Header`, `Body*` с лимитом размера, `Ctx` + типизированные `*Int32`/`*Int64`/`*Bool`/`*As`); каждый несёт спеку через `paramBinder`/`bodyBinder` (`binder.go`)
+- `openapi/` — генерация OpenAPI 3.1 из `App.Operations()`: документ (`openapi.go`), схемы из proto-дескрипторов (`protoschema.go`) и DTO-рефлексии (`reflectschema.go`); тесты — `openapi_test.go` там же
 - `composition_test.go` — все тесты ядра (внешний пакет `composition_test`)
-- `examples/basic/` — runnable end-to-end demo (real `.proto` + bufconn gRPC server)
+- `examples/basic/` — runnable end-to-end demo (real `.proto` + bufconn gRPC server), включая `/openapi.json`
 
 ## Operating rules
 

@@ -1981,3 +1981,68 @@ func TestBodyLimit_Disabled(t *testing.T) {
 		t.Fatalf("status with disabled limit: got %d want 200", resp.StatusCode)
 	}
 }
+
+// ===== Binder interface / App registration =====
+
+func TestBinderFunc_CustomBinder(t *testing.T) {
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /custom", composition.Proxy(client.GetUser,
+		composition.BinderFunc[GetUserRequest](func(_ *http.Request, req *GetUserRequest) error {
+			req.Id = "custom"
+			return nil
+		}),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/custom")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body GetUserResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Id != "custom" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+func TestApp_PathBinderMismatch_PanicsAtRegistration(t *testing.T) {
+	client := &mockClient{}
+	app := composition.New()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic: path binder name absent from the pattern")
+		}
+	}()
+	app.Get("/users/{id}", client.GetUser,
+		bind.PathString("nope", func(req *GetUserRequest, v string) { req.Id = v }),
+	)
+}
+
+func TestApp_Operations(t *testing.T) {
+	client := &mockClient{}
+	app := composition.New()
+	app.Get("/users/{id}", client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).Doc(composition.Doc{OperationID: "get-user"})
+	app.Handle("GET /opaque", http.NotFoundHandler()) // not a proxy — excluded
+
+	ops := app.Operations()
+	if len(ops) != 1 {
+		t.Fatalf("operations: %+v", ops)
+	}
+	op := ops[0]
+	if op.Method != http.MethodGet || op.Pattern != "/users/{id}" || op.Doc.OperationID != "get-user" {
+		t.Fatalf("operation: %+v", op)
+	}
+	if len(op.Params) != 1 || op.Params[0].In != composition.InPath || op.Params[0].Name != "id" || !op.Params[0].Required {
+		t.Fatalf("params: %+v", op.Params)
+	}
+}

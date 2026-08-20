@@ -192,6 +192,8 @@ Available helpers:
 
 UUID / time — through `*As` with a user-supplied parser.
 
+All binders implement the `Binder` interface (`Bind(r, req) error`) and carry metadata for [OpenAPI generation](#openapi-generation). A hand-written binder wraps a plain function in `composition.BinderFunc`, mirroring `http.HandlerFunc`. (Breaking in v0.6: `Binder` used to be a func type.)
+
 ### Protobuf enums
 
 ```go
@@ -395,6 +397,44 @@ app := composition.New(
 Header names are matched case-insensitively. Multi-value headers preserve all values. The forwarded headers reach any gRPC method called via `Proxy` because the framework hands `r.Context()` to the gRPC client, and the App injected outgoing metadata into that context — whether the request came through the App's own router or through `app.Handler(yourRouter)`.
 
 Use this for auth tokens, request-id correlation, locale (`Accept-Language`), tenant ids, etc.
+
+---
+
+## OpenAPI generation
+
+The binders already know the HTTP surface — parameter names, locations, types, enum values, body shapes — so the OpenAPI 3.1 document is generated from them instead of being written by hand:
+
+```go
+app := composition.New()
+app.Get("/users/{id}", users.GetUser,
+    bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
+).Doc(composition.Doc{OperationID: "get-user", Summary: "Get a user by id", Tags: []string{"users"}})
+
+doc := openapi.Generate(app, openapi.Info{Title: "users", Version: "1.0.0"})
+data, _ := json.Marshal(doc)
+app.Handle("GET /openapi.json", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    _, _ = w.Write(data)
+}))
+```
+
+What goes into the document:
+
+- **Operations** — every route registered via the App verb methods. `Route.Doc(composition.Doc{...})` adds operationId / summary / description / tags / deprecated; all optional.
+- **Parameters** — from binder metadata: path parameters are required, query and header optional; typed sugar carries its schema (`integer`/`int32` for `QueryInt32`, `enum` value lists for the `*Enum` binders). `bind.Ctx` and hand-written `BinderFunc` binders consume no HTTP-visible input and are correctly absent.
+- **Request bodies** — `bind.BodyJSON` derives the schema from the proto descriptor, `bind.BodyJSONInto` / `bind.BodyJSONMap` from the DTO type via reflection, `bind.Body` documents an untyped body.
+- **Responses** — the success schema comes from the proto response descriptor following protojson rules (lowerCamel field names, 64-bit integers as strings, enums as name strings, well-known types like `Timestamp` as `date-time` strings; the route's marshal options are respected — `UseProtoNames`, `UseEnumNumbers`), or from the `Map` DTO type following encoding/json rules. Every operation also carries a `default` error response with the RFC 7807 `ProblemDetails` schema.
+- **Components** — message schemas are shared via `$ref`, keyed by the proto full name (`userpb.User`) or the Go type name for DTOs; recursive messages are handled.
+
+The document is plain data — post-process it (servers, security schemes, merging with an existing contract) before serialization.
+
+**Boot-time pattern validation.** Since binders declare their parameters, registration can validate them: a path binder whose parameter has no matching `{name}` segment in the route pattern now panics at startup instead of yielding a 400 on the first request.
+
+Known limitations:
+
+- Only routes registered on the `App` are documented; `Aggregate` endpoints and `Proxy` handlers mounted on a foreign router are opaque (aggregate annotation is a future increment).
+- A message schema lands in components once, using the marshal options of the first route that references it — routes disagreeing on `UseProtoNames` for the same message are not representable.
+- Field-level required/presence semantics are not emitted.
 
 ---
 
@@ -666,15 +706,23 @@ Driven by the first production adopter — an internal BFF fronting six gRPC ser
 | `bind.Ctx` — binder that fills request fields from `context.Context` values set by upstream middleware (auth identity, tenant id) | ✅ Done |
 | Request body size limit in the `Body*` family: 10 MiB default, `bind.SetDefaultMaxBodyBytes`, oversized body → HTTP 413 (`http.MaxBytesError`) | ✅ Done |
 
-### v0.6+ — Sugar & tooling
+### v0.6 — OpenAPI generation ✅ Complete
 
 | Functional Requirement | Status |
 |---|---|
-| OpenAPI generation from binder metadata | 📋 Next |
+| `Binder` becomes an interface (`Bind`) with the `BinderFunc` adapter; every bind/ constructor carries parameter/body metadata (`ParamSpec` / `BodySpec`). **Breaking:** hand-written binder closures must wrap in `composition.BinderFunc` | ✅ Done |
+| OpenAPI 3.1 document generated from binder metadata — `openapi.Generate(app, openapi.Info{...})`; schemas from proto descriptors (protojson rules, route marshal options respected) and Map DTO reflection | ✅ Done |
+| `Route.Doc(composition.Doc{...})` — operationId, summary, description, tags, deprecated | ✅ Done |
+| Boot-time route validation: a path binder without a matching `{name}` segment panics at registration (subsumes the previously planned `Mount` helper) | ✅ Done |
+
+### v0.7+ — Sugar & tooling
+
+| Functional Requirement | Status |
+|---|---|
+| OpenAPI annotation for `Aggregate` endpoints | ⏳ Planned |
 | gin / echo adapters | ⏳ Planned |
 | Optional codegen for setters (if ergonomics turn out to be a real pain point) | ⏳ Planned |
 | Multipart / file upload (`bind.Multipart`) | ⏳ Planned |
-| `Binder` metadata refactor (struct with `PathParam` / `QueryParam` fields) + `Mount` helper that validates declared path params against the route pattern at startup, catching binder/pattern mismatches at boot rather than first request | ⏳ Planned |
 | Typed sugar for `UUID`, `time.Time` (need external dep + format-choice decisions) | ⏳ Planned |
 
 ### Out of scope (explicit non-goals)
@@ -713,13 +761,11 @@ All decisions resolve at route construction time; the runtime hot path runs only
 ## Modules
 
 ```
-/composition          // App, Proxy, Route
-/composition/bind     // Path, Query, JSON
-/composition/errors   // default mapper, code → status table
-/composition/chi      // chi-specific adapter
+/                // composition: App, Proxy, Route, Aggregate, error mapping
+/bind            // binders: Path, Query, Header, Body*, Ctx + typed sugar
+/openapi         // OpenAPI 3.1 document generation from binder metadata
+/examples/basic  // runnable end-to-end demo (real .proto + bufconn)
 ```
-
-Code size for v0.1 — on the order of 400–600 lines.
 
 ---
 

@@ -28,7 +28,10 @@ import (
 //	    return nil
 //	})
 func Query[Req any](name string, setter func(*Req, string) error) composition.Binder[Req] {
-	return func(r *http.Request, req *Req) error {
-		return setter(req, r.URL.Query().Get(name))
+	return paramBinder[Req]{
+		fn: func(r *http.Request, req *Req) error {
+			return setter(req, r.URL.Query().Get(name))
+		},
+		spec: querySpec(name, "string", ""),
 	}
 }

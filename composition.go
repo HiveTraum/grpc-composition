@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -21,8 +22,24 @@ import (
 
 // Binder populates a typed request value from an [*http.Request].
 //
-// Binder constructors live in the bind/ subpackage.
-type Binder[Req any] func(r *http.Request, req *Req) error
+// Binder constructors live in the bind/ subpackage; a hand-written binder
+// wraps a plain function in [BinderFunc]. Binders that additionally
+// implement [ParamDocumenter] or [BodyDocumenter] (all bind/ constructors
+// do) contribute their metadata to generated OpenAPI documents — see
+// [App.Operations] and the openapi subpackage.
+type Binder[Req any] interface {
+	Bind(r *http.Request, req *Req) error
+}
+
+// BinderFunc adapts a plain function to the [Binder] interface, mirroring
+// [http.HandlerFunc]. A BinderFunc carries no metadata, so it never
+// appears in generated OpenAPI documents.
+type BinderFunc[Req any] func(r *http.Request, req *Req) error
+
+// Bind implements [Binder].
+func (f BinderFunc[Req]) Bind(r *http.Request, req *Req) error {
+	return f(r, req)
+}
 
 // UnaryMethod is the canonical signature of any gRPC-generated unary client
 // method. [Proxy] accepts method values of this shape and infers Req/Resp
@@ -93,9 +110,11 @@ type Route[Req, Resp any] struct {
 	method        UnaryMethod[Req, Resp]
 	binders       []Binder[Req]
 	mapper        func(*Resp) any
+	mapOut        reflect.Type // DTO type of the Map transformer, for documentation
 	successStatus int
 	errorMapper   ErrorMapper               // nil → use package-level DefaultErrorMapper
 	marshal       *protojson.MarshalOptions // nil → package-level default
+	doc           Doc
 }
 
 // Proxy returns a [Route] that:
@@ -136,9 +155,11 @@ func Proxy[Req, Resp any](
 func (rt *Route[Req, Resp]) Map[Out any](fn func(*Resp) Out) *Route[Req, Resp] {
 	if fn == nil {
 		rt.mapper = nil
+		rt.mapOut = nil
 		return rt
 	}
 	rt.mapper = func(resp *Resp) any { return fn(resp) }
+	rt.mapOut = reflect.TypeFor[Out]()
 	return rt
 }
 
@@ -175,6 +196,49 @@ func (rt *Route[Req, Resp]) WithMarshalOptions(o protojson.MarshalOptions) *Rout
 	return rt
 }
 
+// Doc attaches human-facing documentation to the route — operation id,
+// summary, tags — surfaced in generated OpenAPI documents. Purely
+// declarative: runtime behavior does not change.
+//
+//	app.Get("/services", svc.ListServices, binders...).
+//	    Doc(composition.Doc{OperationID: "list-services", Tags: []string{"services"}})
+func (rt *Route[Req, Resp]) Doc(d Doc) *Route[Req, Resp] {
+	rt.doc = d
+	return rt
+}
+
+// describable is implemented by *Route to expose documentation metadata
+// to [App.Operations] without the App knowing the route's type parameters.
+type describable interface {
+	operationInfo() OperationInfo
+}
+
+func (rt *Route[Req, Resp]) operationInfo() OperationInfo {
+	info := OperationInfo{
+		Doc:           rt.doc,
+		SuccessStatus: rt.successStatus,
+		Marshal:       rt.marshalOptions(),
+	}
+	for _, b := range rt.binders {
+		if pd, ok := b.(ParamDocumenter); ok {
+			info.Params = append(info.Params, pd.ParamSpec())
+		}
+		if bd, ok := b.(BodyDocumenter); ok {
+			spec := bd.BodySpec()
+			info.Body = &spec
+		}
+	}
+	switch {
+	case rt.mapOut != nil:
+		info.ResponseDTO = rt.mapOut
+	default:
+		if pm, ok := any(new(Resp)).(proto.Message); ok {
+			info.ResponseProto = pm
+		}
+	}
+	return info
+}
+
 func (rt *Route[Req, Resp]) marshalOptions() protojson.MarshalOptions {
 	if rt.marshal != nil {
 		return *rt.marshal
@@ -186,7 +250,7 @@ func (rt *Route[Req, Resp]) marshalOptions() protojson.MarshalOptions {
 func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req Req
 	for _, b := range rt.binders {
-		if err := b(r, &req); err != nil {
+		if err := b.Bind(r, &req); err != nil {
 			code := bindErrorStatus(err)
 			writeError(w, code, ProblemDetails{
 				Status: code,

@@ -256,3 +256,53 @@ func TestDemonstrateBindMismatch(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&prob))
 	require.Contains(t, prob.Detail, `""`, "expected the empty id to appear in the error message")
 }
+
+// TestOpenAPIDocument checks the generated spec served at /openapi.json:
+// every registered route is present, with parameters and schemas derived
+// from the binders.
+func TestOpenAPIDocument(t *testing.T) {
+	srv := newTestServer(t)
+
+	resp, err := http.Get(srv.URL + "/openapi.json")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+
+	var doc struct {
+		OpenAPI string `json:"openapi"`
+		Paths   map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]any `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if doc.OpenAPI != "3.1.0" {
+		t.Fatalf("openapi version: %q", doc.OpenAPI)
+	}
+	for _, want := range []string{"/users/{id}", "/users", "/users-dto/{id}"} {
+		if _, ok := doc.Paths[want]; !ok {
+			t.Fatalf("missing path %q in %v", want, doc.Paths)
+		}
+	}
+	if got := doc.Paths["/users/{id}"]["get"].OperationID; got != "get-user" {
+		t.Fatalf("operationId: %q", got)
+	}
+	user, ok := doc.Components.Schemas["userpb.User"]
+	if !ok {
+		t.Fatalf("missing User schema in %v", doc.Components.Schemas)
+	}
+	if _, ok := user.Properties["name"]; !ok {
+		t.Fatalf("User properties: %v", user.Properties)
+	}
+}

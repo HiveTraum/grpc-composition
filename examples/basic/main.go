@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/HiveTraum/grpc-composition"
 	"github.com/HiveTraum/grpc-composition/bind"
 	"github.com/HiveTraum/grpc-composition/examples/basic/userpb"
+	"github.com/HiveTraum/grpc-composition/openapi"
 )
 
 const bufSize = 1024 * 1024
@@ -128,9 +130,11 @@ func newApp() (http.Handler, func()) {
 	app := composition.New()
 
 	// GET /users/{id} — single path param, proto-by-default response.
+	// Doc(...) is optional and purely declarative — it only enriches the
+	// generated OpenAPI document.
 	app.Get("/users/{id}", users.GetUser,
 		bind.PathString("id", func(req *userpb.GetUserRequest, v string) { req.Id = v }),
-	)
+	).Doc(composition.Doc{OperationID: "get-user", Summary: "Get a user by id", Tags: []string{"users"}})
 
 	// GET /users?limit=10&offset=0&role=ROLE_USER — int32 + enum query params.
 	// Empty values are tolerated; bad parse → HTTP 400 with "<param>:" prefix.
@@ -152,6 +156,19 @@ func newApp() (http.Handler, func()) {
 	).Map(func(u *userpb.User) UserDTO {
 		return UserDTO{ID: u.Id, DisplayName: u.Name, Contact: u.Email}
 	})
+
+	// GET /openapi.json — the OpenAPI 3.1 document generated from the
+	// binder metadata of the routes above. Generate runs once, after all
+	// routes are registered.
+	doc := openapi.Generate(app, openapi.Info{Title: "basic example", Version: "0.1.0"})
+	spec, err := json.Marshal(doc)
+	if err != nil {
+		log.Fatalf("openapi: %v", err)
+	}
+	app.Handle("GET /openapi.json", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(spec)
+	}))
 
 	return app, cleanup
 }
