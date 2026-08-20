@@ -16,7 +16,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/known/apipb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/HiveTraum/grpc-composition"
@@ -1626,5 +1628,356 @@ func TestWithErrorMapper_AcceptsErrorMapperValue(t *testing.T) {
 		if resp.StatusCode != http.StatusTeapot {
 			t.Fatalf("%s status: got %d want 418", path, resp.StatusCode)
 		}
+	}
+}
+
+// ===== protojson marshal options =====
+
+// apiClient returns an empty proto3 message (apipb.Api), so the difference
+// between default marshaling ({}) and EmitUnpopulated (zero-value fields
+// present) is observable without codegen.
+type apiClient struct{}
+
+func (c *apiClient) Get(_ context.Context, _ *GetUserRequest, _ ...grpc.CallOption) (*apipb.Api, error) {
+	return &apipb.Api{}, nil
+}
+
+func fetchJSONObject(t *testing.T, url string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return body
+}
+
+func TestSetDefaultMarshalOptions_EmitUnpopulated(t *testing.T) {
+	t.Cleanup(func() { composition.SetDefaultMarshalOptions(protojson.MarshalOptions{}) })
+
+	client := &apiClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /api", composition.Proxy(client.Get))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if body := fetchJSONObject(t, srv.URL+"/api"); len(body) != 0 {
+		t.Fatalf("default marshal: want empty object, got %v", body)
+	}
+
+	composition.SetDefaultMarshalOptions(protojson.MarshalOptions{EmitUnpopulated: true})
+
+	body := fetchJSONObject(t, srv.URL+"/api")
+	if _, ok := body["name"]; !ok {
+		t.Fatalf("EmitUnpopulated: want zero-value fields present, got %v", body)
+	}
+}
+
+func TestWithMarshalOptions_PerRoute(t *testing.T) {
+	client := &apiClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /default", composition.Proxy(client.Get))
+	mux.Handle("GET /emit", composition.Proxy(client.Get).
+		WithMarshalOptions(protojson.MarshalOptions{EmitUnpopulated: true}))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if body := fetchJSONObject(t, srv.URL+"/default"); len(body) != 0 {
+		t.Fatalf("default route: want empty object, got %v", body)
+	}
+	if body := fetchJSONObject(t, srv.URL+"/emit"); len(body) == 0 {
+		t.Fatal("per-route EmitUnpopulated: want zero-value fields present, got empty object")
+	}
+}
+
+// ===== MapReasons =====
+
+func reasonServer(t *testing.T, callErr error, table map[string]composition.ReasonMapping) *httptest.Server {
+	t.Helper()
+	client := &mockClient{getUserErr: callErr}
+	mux := http.NewServeMux()
+	mux.Handle("GET /users/{id}", composition.Proxy(client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).WithErrorMapper(composition.MapReasons(table, nil)))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestMapReasons_MatchedReason(t *testing.T) {
+	st, err := status.New(codes.FailedPrecondition, "upstream message").WithDetails(
+		&errdetails.ErrorInfo{Reason: "NAME_TAKEN", Domain: "example.com"},
+	)
+	if err != nil {
+		t.Fatalf("WithDetails: %v", err)
+	}
+	srv := reasonServer(t, st.Err(), map[string]composition.ReasonMapping{
+		"NAME_TAKEN": {Status: http.StatusConflict, Detail: "name already taken"},
+	})
+
+	resp, err := http.Get(srv.URL + "/users/1")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+		t.Fatalf("content-type: got %q", ct)
+	}
+	var prob composition.ProblemDetails
+	if err := json.NewDecoder(resp.Body).Decode(&prob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prob.Detail != "name already taken" {
+		t.Fatalf("detail: got %q", prob.Detail)
+	}
+	if prob.Reason != "NAME_TAKEN" || prob.Type != "example.com/NAME_TAKEN" {
+		t.Fatalf("reason/type: got %q / %q", prob.Reason, prob.Type)
+	}
+}
+
+func TestMapReasons_UpstreamDetailWhenEmpty(t *testing.T) {
+	st, err := status.New(codes.FailedPrecondition, "upstream message").WithDetails(
+		&errdetails.ErrorInfo{Reason: "REPO_HOST_DOWN", Domain: "example.com"},
+	)
+	if err != nil {
+		t.Fatalf("WithDetails: %v", err)
+	}
+	srv := reasonServer(t, st.Err(), map[string]composition.ReasonMapping{
+		"REPO_HOST_DOWN": {Status: http.StatusServiceUnavailable},
+	})
+
+	resp, err := http.Get(srv.URL + "/users/1")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want 503", resp.StatusCode)
+	}
+	var prob composition.ProblemDetails
+	if err := json.NewDecoder(resp.Body).Decode(&prob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 5xx with no declared detail: free text redacted, structured members kept.
+	if prob.Detail != "internal error" {
+		t.Fatalf("detail: got %q want redacted", prob.Detail)
+	}
+	if prob.Reason != "REPO_HOST_DOWN" {
+		t.Fatalf("reason: got %q", prob.Reason)
+	}
+}
+
+func TestMapReasons_FallbackOnUnknownReason(t *testing.T) {
+	st, err := status.New(codes.FailedPrecondition, "upstream message").WithDetails(
+		&errdetails.ErrorInfo{Reason: "SOMETHING_ELSE", Domain: "example.com"},
+	)
+	if err != nil {
+		t.Fatalf("WithDetails: %v", err)
+	}
+	srv := reasonServer(t, st.Err(), map[string]composition.ReasonMapping{
+		"NAME_TAKEN": {Status: http.StatusConflict},
+	})
+
+	resp, err := http.Get(srv.URL + "/users/1")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Falls through to the default mapper: FailedPrecondition → 422.
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d want 422", resp.StatusCode)
+	}
+	var prob composition.ProblemDetails
+	if err := json.NewDecoder(resp.Body).Decode(&prob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prob.Detail != "upstream message" {
+		t.Fatalf("detail: got %q", prob.Detail)
+	}
+}
+
+func TestMapReasons_FallbackOnPlainError(t *testing.T) {
+	srv := reasonServer(t, fmt.Errorf("boom"), map[string]composition.ReasonMapping{
+		"NAME_TAKEN": {Status: http.StatusConflict},
+	})
+
+	resp, err := http.Get(srv.URL + "/users/1")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500", resp.StatusCode)
+	}
+}
+
+// ===== bind.Ctx =====
+
+type identityKey struct{}
+
+func TestBindCtx(t *testing.T) {
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /me", composition.Proxy(client.GetUser,
+		bind.Ctx(
+			func(ctx context.Context) (string, error) {
+				v, ok := ctx.Value(identityKey{}).(string)
+				if !ok {
+					return "", fmt.Errorf("no identity")
+				}
+				return v, nil
+			},
+			func(req *GetUserRequest, v string) { req.Id = v },
+		),
+	))
+
+	// Simulated auth middleware: puts the identity into the context.
+	withIdentity := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.Header.Get("X-Test-Identity"); id != "" {
+			r = r.WithContext(context.WithValue(r.Context(), identityKey{}, id))
+		}
+		mux.ServeHTTP(w, r)
+	})
+
+	srv := httptest.NewServer(withIdentity)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/me", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("X-Test-Identity", "org-7")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	var body GetUserResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Id != "org-7" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+func TestBindCtx_GetError(t *testing.T) {
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("GET /me", composition.Proxy(client.GetUser,
+		bind.Ctx(
+			func(_ context.Context) (string, error) { return "", fmt.Errorf("no identity") },
+			func(req *GetUserRequest, v string) { req.Id = v },
+		),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/me")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+	var prob composition.ProblemDetails
+	if err := json.NewDecoder(resp.Body).Decode(&prob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prob.Detail != "bind: context: no identity" {
+		t.Fatalf("detail: got %q", prob.Detail)
+	}
+}
+
+// ===== Body size limit =====
+
+func TestBodyLimit(t *testing.T) {
+	bind.SetDefaultMaxBodyBytes(16)
+	t.Cleanup(func() { bind.SetDefaultMaxBodyBytes(10 << 20) })
+
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("POST /echo", composition.Proxy(client.GetUser,
+		bind.Body(func(data []byte, req *GetUserRequest) error {
+			req.Id = string(data)
+			return nil
+		}),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/echo", "text/plain", strings.NewReader("short"))
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("small body status: got %d want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Post(srv.URL+"/echo", "text/plain", strings.NewReader(strings.Repeat("x", 64)))
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body status: got %d want 413", resp.StatusCode)
+	}
+	var prob composition.ProblemDetails
+	if err := json.NewDecoder(resp.Body).Decode(&prob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prob.Status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("problem status: got %d", prob.Status)
+	}
+}
+
+func TestBodyLimit_Disabled(t *testing.T) {
+	bind.SetDefaultMaxBodyBytes(0)
+	t.Cleanup(func() { bind.SetDefaultMaxBodyBytes(10 << 20) })
+
+	client := &mockClient{}
+	mux := http.NewServeMux()
+	mux.Handle("POST /echo", composition.Proxy(client.GetUser,
+		bind.Body(func(data []byte, req *GetUserRequest) error {
+			req.Id = string(data)
+			return nil
+		}),
+	))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/echo", "text/plain", strings.NewReader(strings.Repeat("x", 1<<20)))
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status with disabled limit: got %d want 200", resp.StatusCode)
 	}
 }

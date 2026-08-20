@@ -106,7 +106,13 @@ func rfc7807Mapper(err error) (int, any) {
 	}
 
 	prob.Detail = st.Message()
+	populateDetails(&prob, st)
+	return httpCode, prob
+}
 
+// populateDetails fills the gRPC-aware extension members of prob from the
+// structured details attached to st via status.WithDetails.
+func populateDetails(prob *ProblemDetails, st *status.Status) {
 	for _, d := range st.Details() {
 		switch v := d.(type) {
 		case *errdetails.BadRequest:
@@ -126,8 +132,93 @@ func rfc7807Mapper(err error) (int, any) {
 			}
 		}
 	}
+}
 
-	return httpCode, prob
+// errorInfoOf returns the google.rpc.ErrorInfo attached to st, or nil.
+func errorInfoOf(st *status.Status) *errdetails.ErrorInfo {
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok {
+			return info
+		}
+	}
+	return nil
+}
+
+// ReasonMapping declares the HTTP response for one google.rpc.ErrorInfo
+// reason in a [MapReasons] table.
+type ReasonMapping struct {
+	// Status is the HTTP status code written when the reason matches.
+	Status int
+	// Detail optionally replaces the RFC 7807 detail member. When empty,
+	// the upstream status message is used — redacted to "internal error"
+	// if Status is 5xx, consistent with the default mapper.
+	Detail string
+}
+
+// MapReasons returns an [ErrorMapper] that resolves errors through a
+// declarative reason table before falling back to fallback (nil → the
+// built-in RFC 7807 mapper).
+//
+// Internal services that distinguish domain errors by a machine-readable
+// reason (google.rpc.ErrorInfo attached via status.WithDetails — the
+// vocabulary is typically an enum in the service contract) let the
+// composition layer declare its HTTP surface as a table instead of
+// rebuilding the same errors.Is / switch chain in every handler:
+//
+//	vocab := composition.MapReasons(map[string]composition.ReasonMapping{
+//	    "SERVICE_NAME_TAKEN":  {Status: http.StatusConflict, Detail: "service name already taken"},
+//	    "REPO_HOST_UNAVAILABLE": {Status: http.StatusServiceUnavailable},
+//	}, nil)
+//
+//	composition.SetDefaultErrorMapper(vocab) // globally
+//	route.WithErrorMapper(vocab)             // or per route
+//
+// A matched reason produces a [ProblemDetails] with the table's status and
+// the usual gRPC-aware members (reason, type, metadata, errors[]) — the
+// reason is part of the declared API vocabulary, so structured members are
+// not redacted even on 5xx; only the free-text detail falls back to
+// "internal error" there. Errors without a status, without an ErrorInfo
+// detail, or with a reason absent from the table go to the fallback mapper
+// unchanged.
+//
+// The table is copied; later mutation of the argument has no effect.
+func MapReasons(table map[string]ReasonMapping, fallback ErrorMapper) ErrorMapper {
+	reasons := make(map[string]ReasonMapping, len(table))
+	for reason, m := range table {
+		reasons[reason] = m
+	}
+	if fallback == nil {
+		fallback = rfc7807Mapper
+	}
+	return func(err error) (int, any) {
+		st, ok := status.FromError(err)
+		if !ok {
+			return fallback(err)
+		}
+		info := errorInfoOf(st)
+		if info == nil {
+			return fallback(err)
+		}
+		m, hit := reasons[info.GetReason()]
+		if !hit {
+			return fallback(err)
+		}
+
+		prob := ProblemDetails{
+			Status: m.Status,
+			Title:  http.StatusText(m.Status),
+		}
+		switch {
+		case m.Detail != "":
+			prob.Detail = m.Detail
+		case m.Status >= 500:
+			prob.Detail = "internal error"
+		default:
+			prob.Detail = st.Message()
+		}
+		populateDetails(&prob, st)
+		return m.Status, prob
+	}
 }
 
 // codeToHTTP maps a gRPC status code to an HTTP status code.

@@ -10,8 +10,8 @@
 
 - `README.md` — vision: scope, principles, Implementation Status, open questions
 - `app.go` — `App`: роутер (`Get`/`Post`/`Put`/`Patch`/`Delete`/`Handle`, сам `http.Handler`) + сквозные концерны (проброс метаданных)
-- `composition.go`, `errors.go` — core: `Proxy`, `Route`, `Binder`, `PathExtractor`, gRPC→HTTP error mapping
-- `bind/` — биндеры (`Path`, `Query`, `JSON` + типизированные `*Int32`/`*Int64`/`*Bool`/`*As`)
+- `composition.go`, `errors.go` — core: `Proxy`, `Route`, `Binder`, `PathExtractor`, gRPC→HTTP error mapping (включая `MapReasons`), protojson-опции сериализации
+- `bind/` — биндеры (`Path`, `Query`, `Header`, `Body*` с лимитом размера, `Ctx` + типизированные `*Int32`/`*Int64`/`*Bool`/`*As`)
 - `composition_test.go` — все тесты ядра (внешний пакет `composition_test`)
 - `examples/basic/` — runnable end-to-end demo (real `.proto` + bufconn gRPC server)
 

@@ -18,6 +18,37 @@ type protoPtr[Req any] interface {
 	proto.Message
 }
 
+// maxBodyBytes caps how many bytes the Body* binders read from a request
+// body. See [SetDefaultMaxBodyBytes].
+var maxBodyBytes int64 = 10 << 20 // 10 MiB
+
+// SetDefaultMaxBodyBytes replaces the request-body size limit enforced by
+// the Body* binders (default 10 MiB). n <= 0 disables the limit.
+//
+// An oversized body fails binding with [http.MaxBytesError], which the
+// framework maps to HTTP 413 instead of the generic bind 400.
+//
+// Intended to be called once at program startup; not safe for concurrent
+// writes during request handling.
+func SetDefaultMaxBodyBytes(n int64) {
+	maxBodyBytes = n
+}
+
+// readBody reads the request body honoring the configured size limit.
+func readBody(r *http.Request) ([]byte, error) {
+	if maxBodyBytes <= 0 {
+		return io.ReadAll(r.Body)
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBodyBytes {
+		return nil, &http.MaxBytesError{Limit: maxBodyBytes}
+	}
+	return data, nil
+}
+
 // BodyJSON parses the HTTP request body as protojson directly into the
 // protobuf request message. Use when the REST body shape matches the
 // proto shape one-to-one — most common case.
@@ -34,7 +65,7 @@ type protoPtr[Req any] interface {
 // handled correctly.
 func BodyJSON[Req any, PReq protoPtr[Req]]() composition.Binder[Req] {
 	return func(r *http.Request, req *Req) error {
-		body, err := io.ReadAll(r.Body)
+		body, err := readBody(r)
 		if err != nil {
 			return err
 		}
@@ -67,8 +98,12 @@ func BodyJSON[Req any, PReq protoPtr[Req]]() composition.Binder[Req] {
 //	})
 func BodyJSONInto[Req any, DTO any](apply func(DTO, *Req) error) composition.Binder[Req] {
 	return func(r *http.Request, req *Req) error {
+		data, err := readBody(r)
+		if err != nil {
+			return err
+		}
 		var dto DTO
-		if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		if err := json.Unmarshal(data, &dto); err != nil {
 			return err
 		}
 		return apply(dto, req)
@@ -90,8 +125,12 @@ func BodyJSONInto[Req any, DTO any](apply func(DTO, *Req) error) composition.Bin
 // For mappings that can fail, use [BodyJSONInto] instead.
 func BodyJSONMap[Req any, DTO any](apply func(DTO, *Req)) composition.Binder[Req] {
 	return func(r *http.Request, req *Req) error {
+		data, err := readBody(r)
+		if err != nil {
+			return err
+		}
 		var dto DTO
-		if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		if err := json.Unmarshal(data, &dto); err != nil {
 			return err
 		}
 		apply(dto, req)
@@ -116,7 +155,7 @@ func BodyJSONMap[Req any, DTO any](apply func(DTO, *Req)) composition.Binder[Req
 //	})
 func Body[Req any](parse func([]byte, *Req) error) composition.Binder[Req] {
 	return func(r *http.Request, req *Req) error {
-		data, err := io.ReadAll(r.Body)
+		data, err := readBody(r)
 		if err != nil {
 			return err
 		}

@@ -188,6 +188,7 @@ Available helpers:
 - **Path**: `PathString`, `PathInt32`, `PathInt64`, `PathFloat64`, `PathBool`, `PathEnum`, `PathAs`
 - **Query**: `QueryString`, `QueryInt32`, `QueryInt64`, `QueryFloat64`, `QueryBool`, `QueryEnum`, `QueryAs`
 - **Header**: `HeaderString`, `HeaderInt32`, `HeaderInt64`, `HeaderFloat64`, `HeaderBool`, `HeaderEnum`, `HeaderAs` (plus generic `Header` with error)
+- **Context**: `Ctx` — value derived from `r.Context()` (see [Context values](#context-values-identity-from-middleware))
 
 UUID / time — through `*As` with a user-supplied parser.
 
@@ -251,6 +252,29 @@ app.Post("/orgs/{org_id}/members", orgClient.AddMember,
 
 If any binder returns an error, the gRPC call does not happen and the client receives HTTP 400 with the message.
 
+`Body*` binders read at most **10 MiB** by default. Tune or disable via `bind.SetDefaultMaxBodyBytes(n)` at program start (`n <= 0` disables). An oversized body fails binding with `http.MaxBytesError` and surfaces as **HTTP 413**, not 400 — the same mapping applies if an upstream `http.MaxBytesReader` trips first.
+
+### Context values (identity from middleware)
+
+`bind.Ctx` fills a request field from a value derived from `r.Context()` — typically identity established by auth middleware in front of the router (user id, tenant / organization id):
+
+```go
+app.Get("/services", servicesClient.ListServices,
+    bind.Ctx(
+        func(ctx context.Context) (string, error) {
+            org, ok := authn.OrganizationID(ctx)
+            if !ok {
+                return "", errors.New("no organization in context")
+            }
+            return org, nil
+        },
+        func(req *pb.ListServicesRequest, v string) { req.OrganizationId = v },
+    ),
+)
+```
+
+An error from the getter surfaces as HTTP 400 like any binder error. In practice a failing getter means the middleware that should have populated (or rejected) the request did not run — prefer rejecting unauthenticated requests in middleware and treating `Ctx` as infallible plumbing.
+
 ### Response mapping (intentional differentiation)
 
 ```go
@@ -270,6 +294,20 @@ Without `Map` — straight `protojson` (proto-by-default). With `Map` — your s
 app.Post("/users", userClient.CreateUser, bindCreate...).
     OnSuccess(http.StatusCreated)
 ```
+
+### Response serialization options
+
+Proto responses are serialized with `protojson`. The default options omit proto3 zero values (`0`, `""`, `false`) from the output; REST contracts that promise stable field presence usually want them emitted:
+
+```go
+// Global (program start):
+composition.SetDefaultMarshalOptions(protojson.MarshalOptions{EmitUnpopulated: true})
+
+// Per route / per aggregate:
+route.WithMarshalOptions(protojson.MarshalOptions{UseProtoNames: true})
+```
+
+Values serialized via `encoding/json` — `Map` DTOs and non-proto `Aggregate` results — are unaffected.
 
 ### Aggregate — custom handlers with framework error mapping
 
@@ -410,6 +448,22 @@ The default error body follows [RFC 7807](https://datatracker.ietf.org/doc/html/
 - Globally: `composition.SetDefaultErrorMapper(fn)` replaces the default mapper at program start
 
 A custom mapper can return any body shape; only `composition.ProblemDetails` triggers the `application/problem+json` Content-Type. Other shapes get `application/json`.
+
+### Reason table
+
+Internal services that distinguish domain errors by a machine-readable reason — `google.rpc.ErrorInfo` attached via `status.WithDetails`, with the vocabulary typically an enum in the service contract — let the composition layer declare its HTTP surface as a table instead of rebuilding the same `switch` in every custom mapper:
+
+```go
+vocab := composition.MapReasons(map[string]composition.ReasonMapping{
+    "SERVICE_NAME_TAKEN":    {Status: http.StatusConflict, Detail: "service name already taken"},
+    "REPO_HOST_UNAVAILABLE": {Status: http.StatusServiceUnavailable},
+}, nil) // nil fallback → the built-in RFC 7807 mapper
+
+composition.SetDefaultErrorMapper(vocab) // globally
+route.WithErrorMapper(vocab)             // or per route
+```
+
+A matched reason produces the usual `ProblemDetails` with the declared status. Empty `Detail` falls back to the upstream status message (redacted to `"internal error"` on 5xx); the structured members (`reason`, `type`, `metadata`, `errors[]`) are always populated on a match — a declared reason is part of your API vocabulary, not a leak. Errors without a gRPC status, without an `ErrorInfo`, or with a reason absent from the table go to the fallback mapper unchanged.
 
 ---
 
@@ -601,11 +655,22 @@ Notes:
 - **Module now requires Go 1.27.** Generic methods have no pre-1.27 fallback; there is no build tag that keeps 1.26 working.
 - The change is source-compatible for existing call sites: `Map(func(*Resp) any)` and `WithErrorMapper(func(error) (int, any))` still compile, with the type parameter inferred as `any`.
 
-### v0.5+ — Sugar & tooling
+### v0.5 — Adopter essentials ✅ Complete
+
+Driven by the first production adopter — an internal BFF fronting six gRPC services, with a committed OpenAPI contract and an `ErrorInfo.reason`-based error vocabulary.
 
 | Functional Requirement | Status |
 |---|---|
-| OpenAPI generation from binder metadata | ⏳ Planned |
+| `protojson` marshal options: `SetDefaultMarshalOptions` (global) + `WithMarshalOptions` (per route / per aggregate) — e.g. `EmitUnpopulated` so proto3 zero values stay in responses | ✅ Done |
+| Declarative error vocabulary: `MapReasons` maps `google.rpc.ErrorInfo.reason` → (HTTP status, detail); composable globally via `SetDefaultErrorMapper` or per route via `WithErrorMapper` | ✅ Done |
+| `bind.Ctx` — binder that fills request fields from `context.Context` values set by upstream middleware (auth identity, tenant id) | ✅ Done |
+| Request body size limit in the `Body*` family: 10 MiB default, `bind.SetDefaultMaxBodyBytes`, oversized body → HTTP 413 (`http.MaxBytesError`) | ✅ Done |
+
+### v0.6+ — Sugar & tooling
+
+| Functional Requirement | Status |
+|---|---|
+| OpenAPI generation from binder metadata | 📋 Next |
 | gin / echo adapters | ⏳ Planned |
 | Optional codegen for setters (if ergonomics turn out to be a real pain point) | ⏳ Planned |
 | Multipart / file upload (`bind.Multipart`) | ⏳ Planned |

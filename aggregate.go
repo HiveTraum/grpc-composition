@@ -3,6 +3,8 @@ package composition
 import (
 	"context"
 	"net/http"
+
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // AggregateFunc is the handler shape accepted by [Aggregate]. It receives
@@ -18,7 +20,8 @@ type AggregateFunc func(ctx context.Context, r *http.Request) (any, error)
 type AggregateRoute struct {
 	fn            AggregateFunc
 	successStatus int
-	errorMapper   ErrorMapper // nil → package-level DefaultErrorMapper
+	errorMapper   ErrorMapper               // nil → package-level DefaultErrorMapper
+	marshal       *protojson.MarshalOptions // nil → package-level default
 }
 
 // Aggregate wraps a custom handler with the same error mapping
@@ -81,6 +84,15 @@ func (rt *AggregateRoute) WithErrorMapper[Body any](fn func(error) (int, Body)) 
 	return rt
 }
 
+// WithMarshalOptions overrides the package-level protojson marshal options
+// (see [SetDefaultMarshalOptions]) for this aggregation only. It affects
+// results that implement [proto.Message]; other values are serialized via
+// encoding/json regardless.
+func (rt *AggregateRoute) WithMarshalOptions(o protojson.MarshalOptions) *AggregateRoute {
+	rt.marshal = &o
+	return rt
+}
+
 // ServeHTTP implements [http.Handler].
 func (rt *AggregateRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := rt.fn(r.Context(), r)
@@ -93,5 +105,9 @@ func (rt *AggregateRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, mappedBody)
 		return
 	}
-	writeResponse(w, rt.successStatus, body)
+	marshal := defaultMarshalOptions
+	if rt.marshal != nil {
+		marshal = *rt.marshal
+	}
+	writeResponse(w, rt.successStatus, body, marshal)
 }

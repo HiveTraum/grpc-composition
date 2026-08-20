@@ -11,6 +11,7 @@ package composition
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"google.golang.org/grpc"
@@ -64,13 +65,37 @@ func PathParam(r *http.Request, name string) string {
 	return defaultPathExtractor(r, name)
 }
 
+var defaultMarshalOptions protojson.MarshalOptions
+
+// SetDefaultMarshalOptions replaces the [protojson.MarshalOptions] used to
+// serialize [proto.Message] responses. The zero value (the default) matches
+// plain protojson.Marshal, where proto3 zero values are omitted from the
+// output — REST APIs that promise stable field presence usually want
+// EmitUnpopulated:
+//
+//	composition.SetDefaultMarshalOptions(protojson.MarshalOptions{
+//	    EmitUnpopulated: true,
+//	})
+//
+// The options apply to [Proxy] responses without a Map transformer and to
+// [Aggregate] results that implement [proto.Message]; values serialized via
+// encoding/json (Map DTOs, non-proto aggregates) are unaffected. Per-route
+// override: [Route.WithMarshalOptions] / [AggregateRoute.WithMarshalOptions].
+//
+// Intended to be called once at program startup; not safe for concurrent
+// writes during request handling.
+func SetDefaultMarshalOptions(o protojson.MarshalOptions) {
+	defaultMarshalOptions = o
+}
+
 // Route is an [http.Handler] that proxies an HTTP request to a unary gRPC method.
 type Route[Req, Resp any] struct {
 	method        UnaryMethod[Req, Resp]
 	binders       []Binder[Req]
 	mapper        func(*Resp) any
 	successStatus int
-	errorMapper   ErrorMapper // nil → use package-level DefaultErrorMapper
+	errorMapper   ErrorMapper               // nil → use package-level DefaultErrorMapper
+	marshal       *protojson.MarshalOptions // nil → package-level default
 }
 
 // Proxy returns a [Route] that:
@@ -143,14 +168,29 @@ func (rt *Route[Req, Resp]) WithErrorMapper[Body any](fn func(error) (int, Body)
 	return rt
 }
 
+// WithMarshalOptions overrides the package-level protojson marshal options
+// (see [SetDefaultMarshalOptions]) for this route only.
+func (rt *Route[Req, Resp]) WithMarshalOptions(o protojson.MarshalOptions) *Route[Req, Resp] {
+	rt.marshal = &o
+	return rt
+}
+
+func (rt *Route[Req, Resp]) marshalOptions() protojson.MarshalOptions {
+	if rt.marshal != nil {
+		return *rt.marshal
+	}
+	return defaultMarshalOptions
+}
+
 // ServeHTTP implements [http.Handler].
 func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req Req
 	for _, b := range rt.binders {
 		if err := b(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, ProblemDetails{
-				Status: http.StatusBadRequest,
-				Title:  http.StatusText(http.StatusBadRequest),
+			code := bindErrorStatus(err)
+			writeError(w, code, ProblemDetails{
+				Status: code,
+				Title:  http.StatusText(code),
 				Detail: "bind: " + err.Error(),
 			})
 			return
@@ -172,7 +212,19 @@ func (rt *Route[Req, Resp]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, rt.successStatus, rt.mapper(resp))
 		return
 	}
-	writeResponse(w, rt.successStatus, resp)
+	writeResponse(w, rt.successStatus, resp, rt.marshalOptions())
+}
+
+// bindErrorStatus picks the HTTP status for a binder failure: 400 for
+// malformed input, except an oversized request body ([http.MaxBytesError],
+// produced by the bind.Body* size limit or an upstream
+// [http.MaxBytesReader]) which is 413.
+func bindErrorStatus(err error) int {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
 }
 
 // writeError writes an error response. If the body is a [ProblemDetails],
@@ -191,10 +243,10 @@ func writeError(w http.ResponseWriter, status int, body any) {
 // writeResponse writes resp as protojson when it is a [proto.Message]; this
 // is the expected path for any gRPC-generated response type. For non-proto
 // values (e.g. mock responses in tests) it falls back to [encoding/json].
-func writeResponse(w http.ResponseWriter, status int, resp any) {
+func writeResponse(w http.ResponseWriter, status int, resp any, marshal protojson.MarshalOptions) {
 	w.Header().Set("Content-Type", "application/json")
 	if pm, ok := resp.(proto.Message); ok {
-		data, err := protojson.Marshal(pm)
+		data, err := marshal.Marshal(pm)
 		if err == nil {
 			w.WriteHeader(status)
 			_, _ = w.Write(data)
