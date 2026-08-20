@@ -16,6 +16,8 @@ A thin, opinionated Go layer between HTTP and unary gRPC that:
 
 **Tagline:** *Composition owns routing and binding. Protobuf owns the wire. `buf` owns the compatibility. OTel middlewares own the tracing.*
 
+**Requires Go 1.27+**: route registration (`app.Get`, `app.Post`, …) and typed callbacks (`Map`, `WithErrorMapper`) are generic methods, which the language gained in 1.27.
+
 ---
 
 ## Problem
@@ -62,34 +64,33 @@ defer conn.Close()
 
 statsClient := v1.NewStatisticsClient(conn)
 
-mux := http.NewServeMux()
+app := composition.New()
 
 // Simple proxy: single path param → request field.
-mux.Handle("GET /flights/cheap/{start_city_code}", composition.Proxy(statsClient.GetCheap,
+app.Get("/flights/cheap/{start_city_code}", statsClient.GetCheap,
     bind.PathString("start_city_code", func(req *v1.GetCheapRequest, v string) { req.StartCityCode = v }),
-))
+)
 
-mux.Handle("GET /flights/popular/{start_city_code}", composition.Proxy(statsClient.GetPopular,
+app.Get("/flights/popular/{start_city_code}", statsClient.GetPopular,
     bind.PathString("start_city_code", func(req *v1.GetPopularRequest, v string) { req.StartCityCode = v }),
-))
+)
 
-mux.Handle("GET /flights/cheap_by_airline/{airline_code}", composition.Proxy(statsClient.GetCheapByAirline,
+app.Get("/flights/cheap_by_airline/{airline_code}", statsClient.GetCheapByAirline,
     bind.PathString("airline_code", func(req *v1.GetCheapByAirlineRequest, v string) { req.AirlineCode = v }),
-))
+)
 
 // Multiple path params + an enum — one binder per field, in any order.
-mux.Handle("GET /flights/calendar/{start_city_code}/{end_city_code}/{from_date}/{to_date}/{service_class}",
-    composition.Proxy(statsClient.GetCalendar,
-        bind.PathString("start_city_code", func(req *v1.GetCalendarRequest, v string) { req.StartCityCode = v }),
-        bind.PathString("end_city_code",   func(req *v1.GetCalendarRequest, v string) { req.EndCityCode = v }),
-        bind.PathString("from_date",       func(req *v1.GetCalendarRequest, v string) { req.FromDate = v }),
-        bind.PathString("to_date",         func(req *v1.GetCalendarRequest, v string) { req.ToDate = v }),
-        bind.PathEnum  ("service_class",   func(req *v1.GetCalendarRequest, v v1.ServiceClass) { req.ServiceClass = v }),
-    ),
+app.Get("/flights/calendar/{start_city_code}/{end_city_code}/{from_date}/{to_date}/{service_class}",
+    statsClient.GetCalendar,
+    bind.PathString("start_city_code", func(req *v1.GetCalendarRequest, v string) { req.StartCityCode = v }),
+    bind.PathString("end_city_code",   func(req *v1.GetCalendarRequest, v string) { req.EndCityCode = v }),
+    bind.PathString("from_date",       func(req *v1.GetCalendarRequest, v string) { req.FromDate = v }),
+    bind.PathString("to_date",         func(req *v1.GetCalendarRequest, v string) { req.ToDate = v }),
+    bind.PathEnum  ("service_class",   func(req *v1.GetCalendarRequest, v v1.ServiceClass) { req.ServiceClass = v }),
 )
 
 // Aggregation: two parallel gRPC calls assembled into one HTTP response.
-mux.Handle("GET /flights/cheap_and_popular/{start_city_code}", composition.Aggregate(
+app.Handle("GET /flights/cheap_and_popular/{start_city_code}", composition.Aggregate(
     func(ctx context.Context, r *http.Request) (any, error) {
         startCityCode := r.PathValue("start_city_code")
 
@@ -119,7 +120,7 @@ mux.Handle("GET /flights/cheap_and_popular/{start_city_code}", composition.Aggre
 ))
 
 log.Println("listening on :8080")
-log.Fatal(http.ListenAndServe(":8080", mux))
+log.Fatal(http.ListenAndServe(":8080", app))
 ```
 
 Every gRPC error from `statsClient.*` flows through `DefaultErrorMapper` — `NotFound` → 404, `InvalidArgument` → 400, etc.; 5xx bodies are redacted (see [Error mapping](#error-mapping)). For the cookbook on parallel / optional calls inside `Aggregate`, see [Aggregation patterns](#aggregation-patterns).
@@ -150,23 +151,23 @@ Every gRPC error from `statsClient.*` flows through `DefaultErrorMapper` — `No
 ### Simple proxy
 
 ```go
-r.Get("/users/{id}",
-    app.Proxy(userClient.GetUser,
-        bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
-    ),
+app.Get("/users/{id}", userClient.GetUser,
+    bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
 )
 ```
+
+`App` owns the router: `Get` / `Post` / `Put` / `Patch` / `Delete` take a URL pattern, a generated gRPC client method and the binders, and return the registered `*Route` for chaining (`Map`, `OnSuccess`, `WithErrorMapper`). `Req` / `Resp` are inferred from the method value.
+
+To keep an existing router instead, build the handler with the package-level `composition.Proxy(method, binders...)` and register it yourself — see [Application setup](#application-setup).
 
 For string fields, `PathString` / `QueryString` are infallible: assigning a string can't fail, so the setter doesn't need to return `error`. Use the generic `bind.Path` / `bind.Query` (with `func(*Req, string) error`) when you need to validate the value or parse it into a non-string field — parse errors automatically surface as HTTP 400.
 
 ### Query params with typed parsing
 
 ```go
-r.Get("/users",
-    app.Proxy(userClient.ListUsers,
-        bind.QueryInt32("limit",  func(req *pb.ListUsersRequest, v int32) { req.Limit = v }),
-        bind.QueryInt32("offset", func(req *pb.ListUsersRequest, v int32) { req.Offset = v }),
-    ),
+app.Get("/users", userClient.ListUsers,
+    bind.QueryInt32("limit",  func(req *pb.ListUsersRequest, v int32) { req.Limit = v }),
+    bind.QueryInt32("offset", func(req *pb.ListUsersRequest, v int32) { req.Offset = v }),
 )
 ```
 
@@ -193,10 +194,8 @@ UUID / time — through `*As` with a user-supplied parser.
 ### Protobuf enums
 
 ```go
-r.Get("/users",
-    app.Proxy(userClient.ListUsers,
-        bind.QueryEnum("role", func(req *pb.ListUsersRequest, v pb.Role) { req.Role = v }),
-    ),
+app.Get("/users", userClient.ListUsers,
+    bind.QueryEnum("role", func(req *pb.ListUsersRequest, v pb.Role) { req.Role = v }),
 )
 ```
 
@@ -244,11 +243,9 @@ bind.Body(func(data []byte, req *pb.Req) error {
 Combine with other binders in one route — binders run in order:
 
 ```go
-r.Post("/orgs/{org_id}/members",
-    app.Proxy(orgClient.AddMember,
-        bind.BodyJSON[pb.AddMemberRequest](),
-        bind.PathString("org_id", func(req *pb.AddMemberRequest, v string) { req.OrgId = v }),
-    ),
+app.Post("/orgs/{org_id}/members", orgClient.AddMember,
+    bind.BodyJSON[pb.AddMemberRequest](),
+    bind.PathString("org_id", func(req *pb.AddMemberRequest, v string) { req.OrgId = v }),
 )
 ```
 
@@ -257,18 +254,20 @@ If any binder returns an error, the gRPC call does not happen and the client rec
 ### Response mapping (intentional differentiation)
 
 ```go
-app.Proxy(userClient.GetUser, bindGetUser).
-    Map(func(resp *pb.GetUserResponse) any {
+app.Get("/users/{id}", userClient.GetUser, bindGetUser...).
+    Map(func(resp *pb.GetUserResponse) UserDTO {
         return UserDTO{ID: resp.User.Id, DisplayName: resp.User.FullName}
     })
 ```
+
+`Map` is a generic method: the DTO type is inferred from the transformer, so the callback keeps its natural signature instead of being widened to `func(*Resp) any`. A transformer returning `any` still works.
 
 Without `Map` — straight `protojson` (proto-by-default). With `Map` — your shape, your responsibility.
 
 ### HTTP status code
 
 ```go
-app.Proxy(userClient.CreateUser, bindCreate).
+app.Post("/users", userClient.CreateUser, bindCreate...).
     OnSuccess(http.StatusCreated)
 ```
 
@@ -277,7 +276,7 @@ app.Proxy(userClient.CreateUser, bindCreate).
 When an endpoint needs to call multiple gRPC services and assemble a combined response, `Proxy` does not fit (there is no one-to-one HTTP↔gRPC mapping). `Aggregate` wraps a custom handler with the same RFC 7807 error mapping and response serialization that `Proxy` uses:
 
 ```go
-mux.Handle("GET /feed/{user_id}", composition.Aggregate(
+app.Handle("GET /feed/{user_id}", composition.Aggregate(
     func(ctx context.Context, r *http.Request) (any, error) {
         uid := r.PathValue("user_id")
 
@@ -312,8 +311,8 @@ The handler's error path flows through `DefaultErrorMapper` — same RFC 7807 / 
 ### Application setup
 
 ```go
-// App carries cross-cutting concerns (currently HTTP→gRPC metadata
-// forwarding). Wrap the router with app.Handler to apply them globally.
+// App owns the router and the cross-cutting concerns (currently HTTP→gRPC
+// metadata forwarding), and is itself an http.Handler.
 app := composition.New(
     composition.WithMetadataForward("authorization", "x-request-id", "accept-language"),
 )
@@ -322,21 +321,27 @@ app := composition.New(
 // Per-route override is also available: route.WithErrorMapper(fn).
 composition.SetDefaultErrorMapper(myMapper)
 
-r := http.NewServeMux()
-
 userConn, _ := grpc.NewClient(addr,
     grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 )
 userClient := pb.NewUserServiceClient(userConn)
 
+app.Get("/users/{id}", userClient.GetUser,
+    bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
+)
+
+// Combine with otelhttp on the outside for tracing.
+http.ListenAndServe(":8080", otelhttp.NewMiddleware("api")(app))
+```
+
+**Bringing your own router.** Incremental adoption does not require handing routing over to `App`: register `composition.Proxy(...)` handlers on any router (chi, gorilla, a plain `http.ServeMux`) and wrap it with `app.Handler` so the App-level concerns still apply.
+
+```go
+r := http.NewServeMux()
 r.Handle("GET /users/{id}", composition.Proxy(userClient.GetUser,
     bind.PathString("id", func(req *pb.GetUserRequest, v string) { req.Id = v }),
 ))
-
-// Wrap with app.Handler so the configured headers flow into outgoing
-// gRPC metadata; combine with otelhttp on the outside for tracing.
-handler := otelhttp.NewMiddleware("api")(app.Handler(r))
-http.ListenAndServe(":8080", handler)
+http.ListenAndServe(":8080", app.Handler(r))
 ```
 
 ### HTTP → gRPC metadata forwarding
@@ -347,10 +352,9 @@ http.ListenAndServe(":8080", handler)
 app := composition.New(
     composition.WithMetadataForward("Authorization", "X-Request-ID"),
 )
-handler := app.Handler(mux)
 ```
 
-Header names are matched case-insensitively. Multi-value headers preserve all values. The forwarded headers reach any gRPC method called via `Proxy` because the framework hands `r.Context()` to the gRPC client, and `app.Handler` injected outgoing metadata into that context.
+Header names are matched case-insensitively. Multi-value headers preserve all values. The forwarded headers reach any gRPC method called via `Proxy` because the framework hands `r.Context()` to the gRPC client, and the App injected outgoing metadata into that context — whether the request came through the App's own router or through `app.Handler(yourRouter)`.
 
 Use this for auth tokens, request-id correlation, locale (`Accept-Language`), tenant ids, etc.
 
@@ -416,7 +420,7 @@ A custom mapper can return any body shape; only `composition.ProblemDetails` tri
 ### Two parallel calls
 
 ```go
-mux.Handle("GET /feed/{user_id}", composition.Aggregate(
+app.Handle("GET /feed/{user_id}", composition.Aggregate(
     func(ctx context.Context, r *http.Request) (any, error) {
         uid := r.PathValue("user_id")
 
@@ -549,7 +553,7 @@ Legend: ✅ Done · 📋 Next · ⏳ Planned · ❌ Out of scope
 | `bind.Path` (via `r.PathValue`, stdlib 1.22+) | ✅ Done |
 | `bind.Query` | ✅ Done |
 | `bind.BodyJSON` (protojson + generic `proto.Message` constraint) — renamed from `bind.JSON` in v0.2 | ✅ Done |
-| Response mapping `Map(func(*Resp) any)` | ✅ Done |
+| Response mapping `Map(func(*Resp) Out)` | ✅ Done |
 | HTTP success status override `OnSuccess(int)` | ✅ Done |
 | gRPC `Status` → HTTP code mapping + 5xx redaction | ✅ Done |
 | `protojson` serialization for `proto.Message` responses | ✅ Done |
@@ -581,7 +585,23 @@ Notes:
 
 - **Parallelism is deliberately not framework concern.** `errgroup` (stdlib), [`sourcegraph/conc`](https://github.com/sourcegraph/conc), and [`samber/ro`](https://github.com/samber/ro) (ReactiveX `Future` + `CombineLatestN`) all cover that space well — they live one import away and the framework would only add boilerplate-shifted-elsewhere. See the [Aggregation patterns](#aggregation-patterns) cookbook for the recommended `errgroup` recipe.
 
-### v0.4+ — Sugar & tooling
+### v0.4 — App-owned routing (Go 1.27) ✅ Complete
+
+Generic methods (Go 1.27) let a method on a non-generic type declare its own type parameters. That unblocks the API the vision always described: routes registered on the `App` itself, and callbacks that keep their own types instead of being widened to `any`.
+
+| Functional Requirement | Status |
+|---|---|
+| `App` owns the router: `Get` / `Post` / `Put` / `Patch` / `Delete` infer `Req`/`Resp` from the client method, `Handle` for `Aggregate` and friends, `App` implements `http.Handler` | ✅ Done |
+| `Map[Out]` — response transformer keeps its DTO type | ✅ Done |
+| `WithErrorMapper[Body]` (route + aggregate) — error mapper keeps its body type; an `ErrorMapper` value is still accepted | ✅ Done |
+| Bring-your-own-router path preserved: package-level `Proxy` + `App.Handler` | ✅ Done |
+
+Notes:
+
+- **Module now requires Go 1.27.** Generic methods have no pre-1.27 fallback; there is no build tag that keeps 1.26 working.
+- The change is source-compatible for existing call sites: `Map(func(*Resp) any)` and `WithErrorMapper(func(error) (int, any))` still compile, with the type parameter inferred as `any`.
+
+### v0.5+ — Sugar & tooling
 
 | Functional Requirement | Status |
 |---|---|

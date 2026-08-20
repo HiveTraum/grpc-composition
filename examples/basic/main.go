@@ -125,38 +125,42 @@ func newInProcessClient() (userpb.UserServiceClient, func()) {
 func newApp() (http.Handler, func()) {
 	users, cleanup := newInProcessClient()
 
-	mux := http.NewServeMux()
+	app := composition.New()
 
 	// GET /users/{id} — single path param, proto-by-default response.
-	mux.Handle("GET /users/{id}", composition.Proxy(users.GetUser,
+	app.Get("/users/{id}", users.GetUser,
 		bind.PathString("id", func(req *userpb.GetUserRequest, v string) { req.Id = v }),
-	))
+	)
 
 	// GET /users?limit=10&offset=0&role=ROLE_USER — int32 + enum query params.
 	// Empty values are tolerated; bad parse → HTTP 400 with "<param>:" prefix.
-	mux.Handle("GET /users", composition.Proxy(users.ListUsers,
+	app.Get("/users", users.ListUsers,
 		bind.QueryInt32("limit", func(req *userpb.ListUsersRequest, v int32) { req.Limit = v }),
 		bind.QueryInt32("offset", func(req *userpb.ListUsersRequest, v int32) { req.Offset = v }),
 		bind.QueryEnum("role", func(req *userpb.ListUsersRequest, v userpb.Role) { req.Role = v }),
-	))
+	)
 
 	// POST /users — JSON body, returns 201 Created on success.
-	mux.Handle("POST /users", composition.Proxy(users.CreateUser,
+	app.Post("/users", users.CreateUser,
 		bind.BodyJSON[userpb.CreateUserRequest](),
-	).OnSuccess(http.StatusCreated))
+	).OnSuccess(http.StatusCreated)
 
 	// GET /users-dto/{id} — same upstream call, different REST shape via Map.
-	mux.Handle("GET /users-dto/{id}", composition.Proxy(users.GetUser,
+	// The transformer keeps its own return type; Map infers it.
+	app.Get("/users-dto/{id}", users.GetUser,
 		bind.PathString("id", func(req *userpb.GetUserRequest, v string) { req.Id = v }),
-	).Map(func(u *userpb.User) any {
-		return map[string]string{
-			"id":           u.Id,
-			"display_name": u.Name,
-			"contact":      u.Email,
-		}
-	}))
+	).Map(func(u *userpb.User) UserDTO {
+		return UserDTO{ID: u.Id, DisplayName: u.Name, Contact: u.Email}
+	})
 
-	return mux, cleanup
+	return app, cleanup
+}
+
+// UserDTO is the REST-facing shape served by /users-dto/{id}.
+type UserDTO struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Contact     string `json:"contact"`
 }
 
 func main() {

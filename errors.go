@@ -26,11 +26,11 @@ type ErrorMapper func(err error) (int, any)
 // When the framework writes a ProblemDetails value to an HTTP response,
 // Content-Type is set to application/problem+json (per RFC 7807).
 type ProblemDetails struct {
-	Type     string            `json:"type,omitempty"`
-	Title    string            `json:"title"`
-	Status   int               `json:"status"`
-	Detail   string            `json:"detail,omitempty"`
-	Instance string            `json:"instance,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail,omitempty"`
+	Instance string `json:"instance,omitempty"`
 
 	// gRPC-aware extension members.
 	Reason   string            `json:"reason,omitempty"`
@@ -43,6 +43,18 @@ type ProblemDetails struct {
 type FieldViolation struct {
 	Field       string `json:"field"`
 	Description string `json:"description"`
+}
+
+// toErrorMapper widens a mapper with a concrete body type into the
+// [ErrorMapper] shape stored on a route. A nil mapper stays nil, so the
+// route keeps falling back to [DefaultErrorMapper].
+func toErrorMapper[Body any](fn func(error) (int, Body)) ErrorMapper {
+	if fn == nil {
+		return nil
+	}
+	return func(err error) (int, any) {
+		return fn(err)
+	}
 }
 
 var defaultErrorMapper ErrorMapper = rfc7807Mapper

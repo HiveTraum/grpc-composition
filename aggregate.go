@@ -74,9 +74,10 @@ func (rt *AggregateRoute) OnSuccess(status int) *AggregateRoute {
 }
 
 // WithErrorMapper overrides the package-level [DefaultErrorMapper] for
-// this aggregation only. Mirrors [Route.WithErrorMapper].
-func (rt *AggregateRoute) WithErrorMapper(fn ErrorMapper) *AggregateRoute {
-	rt.errorMapper = fn
+// this aggregation only. Mirrors [Route.WithErrorMapper], including the
+// inferred error-body type Body.
+func (rt *AggregateRoute) WithErrorMapper[Body any](fn func(error) (int, Body)) *AggregateRoute {
+	rt.errorMapper = toErrorMapper(fn)
 	return rt
 }
 

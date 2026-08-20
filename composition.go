@@ -97,10 +97,23 @@ func Proxy[Req, Resp any](
 // serialization. Use it when the REST API should expose a different shape
 // than the protobuf response (intentional differentiation).
 //
+// Out is the DTO type returned by fn; it is inferred from the callback, so
+// the transformer keeps its natural signature instead of being widened to
+// any:
+//
+//	composition.Proxy(users.GetUser, ...).
+//	    Map(func(u *pb.User) UserDTO {
+//	        return UserDTO{ID: u.Id, DisplayName: u.Name}
+//	    })
+//
 // The returned value is serialized via encoding/json — protojson semantics
 // no longer apply once the proto type is left behind.
-func (rt *Route[Req, Resp]) Map(fn func(*Resp) any) *Route[Req, Resp] {
-	rt.mapper = fn
+func (rt *Route[Req, Resp]) Map[Out any](fn func(*Resp) Out) *Route[Req, Resp] {
+	if fn == nil {
+		rt.mapper = nil
+		return rt
+	}
+	rt.mapper = func(resp *Resp) any { return fn(resp) }
 	return rt
 }
 
@@ -117,11 +130,16 @@ func (rt *Route[Req, Resp]) OnSuccess(status int) *Route[Req, Resp] {
 // formatting (e.g. a legacy API contract) while the rest of the service
 // follows the default RFC 7807 shape.
 //
-//	route.WithErrorMapper(func(err error) (int, any) {
-//	    return 500, map[string]string{"code": "X-LEGACY"}
+// Body is the error-body type returned by fn, inferred from the callback,
+// so a mapper with a concrete body type needs no any in its signature:
+//
+//	route.WithErrorMapper(func(err error) (int, LegacyError) {
+//	    return 500, LegacyError{Code: "X-LEGACY"}
 //	})
-func (rt *Route[Req, Resp]) WithErrorMapper(fn ErrorMapper) *Route[Req, Resp] {
-	rt.errorMapper = fn
+//
+// An [ErrorMapper] value (Body = any) is accepted as well.
+func (rt *Route[Req, Resp]) WithErrorMapper[Body any](fn func(error) (int, Body)) *Route[Req, Resp] {
+	rt.errorMapper = toErrorMapper(fn)
 	return rt
 }
 

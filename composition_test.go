@@ -468,7 +468,6 @@ func TestQueryString(t *testing.T) {
 	})
 }
 
-
 func TestQueryInt32(t *testing.T) {
 	client := &mockClient{}
 	mux := http.NewServeMux()
@@ -1403,4 +1402,229 @@ func TestHeaderEnum(t *testing.T) {
 			t.Fatalf("status: got %d want 400", resp.StatusCode)
 		}
 	})
+}
+
+// ===== App as router (generic methods on a non-generic type) =====
+
+func TestApp_VerbMethods(t *testing.T) {
+	client := &mockClient{}
+
+	app := composition.New()
+	app.Get("/users/{id}", client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	)
+	app.Post("/users", client.ListUsers,
+		bind.BodyJSONMap(func(dto struct {
+			Limit int32 `json:"limit"`
+		}, req *ListUsersRequest) {
+			req.Limit = dto.Limit
+		}),
+	).OnSuccess(http.StatusCreated)
+	app.Delete("/users/{id}", client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	)
+
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	t.Run("get", func(t *testing.T) {
+		resp, err := http.Get(srv.URL + "/users/42")
+		if err != nil {
+			t.Fatalf("http: %v", err)
+		}
+		defer resp.Body.Close()
+		var body GetUserResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Id != "42" || body.Name != "User-42" {
+			t.Fatalf("body: %+v", body)
+		}
+	})
+
+	t.Run("post honours OnSuccess", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/users", "application/json",
+			strings.NewReader(`{"limit":7}`))
+		if err != nil {
+			t.Fatalf("http: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("status: got %d want 201", resp.StatusCode)
+		}
+		var body ListUsersResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Count != 7 {
+			t.Fatalf("body: %+v", body)
+		}
+	})
+
+	t.Run("verb is part of the pattern", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/users/42", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("http: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("status: got %d want 405 (PUT not registered)", resp.StatusCode)
+		}
+	})
+}
+
+func TestApp_HandleAggregate(t *testing.T) {
+	app := composition.New()
+	app.Handle("GET /feed", composition.Aggregate(
+		func(_ context.Context, _ *http.Request) (any, error) {
+			return map[string]int{"items": 2}, nil
+		},
+	))
+
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/feed")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+	var body map[string]int
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["items"] != 2 {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+func TestApp_ServeHTTP_ForwardsMetadata(t *testing.T) {
+	client := &captureClient{}
+
+	app := composition.New(composition.WithMetadataForward("Authorization"))
+	app.Get("/echo/{v}", client.Echo,
+		bind.PathString("v", func(req *wrapperspb.StringValue, v string) { req.Value = v }),
+	)
+
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/echo/hi", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	req.Header.Set("X-Not-Forwarded", "should-not-leak")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := client.captured.Get("authorization"); len(got) != 1 || got[0] != "Bearer secret-token" {
+		t.Fatalf("authorization: %v", got)
+	}
+	if got := client.captured.Get("x-not-forwarded"); len(got) != 0 {
+		t.Fatalf("x-not-forwarded must NOT be forwarded: %v", got)
+	}
+}
+
+// ===== Typed callbacks enabled by generic methods =====
+
+func TestProxy_Map_TypedDTO(t *testing.T) {
+	client := &mockClient{}
+
+	app := composition.New()
+	// The transformer returns UserDTO, not any: Out is inferred from it.
+	app.Get("/users/{id}", client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).Map(func(resp *GetUserResponse) UserDTO {
+		return UserDTO{ID: resp.Id, DisplayName: "Mr. " + resp.Name}
+	})
+
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/users/42")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var body UserDTO
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ID != "42" || body.DisplayName != "Mr. User-42" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+func TestWithErrorMapper_TypedBody(t *testing.T) {
+	type LegacyError struct {
+		LegacyCode string `json:"legacy_code"`
+		Msg        string `json:"msg"`
+	}
+
+	client := &mockClient{getUserErr: status.Error(codes.NotFound, "no user")}
+
+	app := composition.New()
+	// Body is inferred as LegacyError — the mapper needs no any.
+	app.Get("/users/{id}", client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).WithErrorMapper(func(err error) (int, LegacyError) {
+		return http.StatusTeapot, LegacyError{LegacyCode: "TEAPOT", Msg: err.Error()}
+	})
+
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/users/42")
+	if err != nil {
+		t.Fatalf("http: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTeapot {
+		t.Fatalf("status: got %d want 418", resp.StatusCode)
+	}
+	var body LegacyError
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.LegacyCode != "TEAPOT" {
+		t.Fatalf("body: %+v", body)
+	}
+}
+
+// An ErrorMapper value still satisfies the generic mapper methods
+// (Body = any), so pre-existing mappers keep compiling.
+func TestWithErrorMapper_AcceptsErrorMapperValue(t *testing.T) {
+	var mapper composition.ErrorMapper = func(error) (int, any) {
+		return http.StatusTeapot, map[string]string{"legacy_code": "TEAPOT"}
+	}
+
+	client := &mockClient{getUserErr: status.Error(codes.NotFound, "no user")}
+
+	app := composition.New()
+	app.Get("/users/{id}", client.GetUser,
+		bind.PathString("id", func(req *GetUserRequest, v string) { req.Id = v }),
+	).WithErrorMapper(mapper)
+	app.Handle("GET /feed", composition.Aggregate(
+		func(_ context.Context, _ *http.Request) (any, error) {
+			return nil, status.Error(codes.NotFound, "no feed")
+		},
+	).WithErrorMapper(mapper))
+
+	srv := httptest.NewServer(app)
+	defer srv.Close()
+
+	for _, path := range []string{"/users/42", "/feed"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("http %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusTeapot {
+			t.Fatalf("%s status: got %d want 418", path, resp.StatusCode)
+		}
+	}
 }

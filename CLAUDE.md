@@ -9,6 +9,7 @@
 ## Layout
 
 - `README.md` — vision: scope, principles, Implementation Status, open questions
+- `app.go` — `App`: роутер (`Get`/`Post`/`Put`/`Patch`/`Delete`/`Handle`, сам `http.Handler`) + сквозные концерны (проброс метаданных)
 - `composition.go`, `errors.go` — core: `Proxy`, `Route`, `Binder`, `PathExtractor`, gRPC→HTTP error mapping
 - `bind/` — биндеры (`Path`, `Query`, `JSON` + типизированные `*Int32`/`*Int64`/`*Bool`/`*As`)
 - `composition_test.go` — все тесты ядра (внешний пакет `composition_test`)
@@ -26,7 +27,8 @@
 
 ## Toolchain notes
 
-- `go.mod` указывает `go 1.25.0` (форсируется транзитивными deps `google.golang.org/grpc`). С `GOTOOLCHAIN=auto` (дефолт) Go скачивает 1.25 и собирает корректно. **Не понижать** до 1.22/1.23 — локальный `/usr/local/go` (1.23.4) сломан, см. auto-memory `env-go-install-broken`.
+- `go.mod` указывает `go 1.27.0` — минимум задаётся **generic methods** (`App.Get` и Ко, `Map[Out]`, `WithErrorMapper[Body]`), фолбэка на 1.26 нет. С `GOTOOLCHAIN=auto` (дефолт) Go скачивает 1.27 и собирает корректно. **Не понижать** — локальный `/usr/local/go` (1.23.4) сломан, см. auto-memory `env-go-install-broken`.
+- `go vet ./...` ругается на `resp, _ := http.Get(...)` в `composition_test.go` («using resp before checking for errors») — это было и на 1.26, к переезду на 1.27 отношения не имеет.
 - `protoc-gen-go` (v1.34.2) уже установлен в `/usr/local/bin/protoc-gen-go` (из официального release tarball protobuf-go).
 - `protoc-gen-go-grpc` (v1.5.1) уже установлен в `/usr/local/bin/protoc-gen-go-grpc` (собран из `/tmp/grpc-go-src/cmd/protoc-gen-go-grpc` с `GOTOOLCHAIN=go1.25.0`).
 - Если плагинов нет (свежее окружение): см. auto-memory `env-go-install-broken` — `go install` напрямую не работает, нужно либо pre-built binary, либо `GOTOOLCHAIN=go1.25.0 go build`.
